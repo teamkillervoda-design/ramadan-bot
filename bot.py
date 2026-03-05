@@ -888,31 +888,32 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return ST_PHONE
 
     if user and user.get("phone") and user.get("enc_password"):
-        # جدد التوكن لو انتهى
-        token = await ensure_token(user)
-        if token:
-            # حدّث بيانات الكرت
-            user = await get_user(u.id)
-            v   = user.get("card_value", 0)
-            n   = user.get("card_units", 0)
-            unseen = await db_val(
-                "SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND seen=0", u.id
-            ) or 0
-            notif_txt = f"\n🔔 *{unseen} إشعار جديد!*" if unseen else ""
-            welcome = (
-                f"🌙 *رمضان كريم، {u.first_name}!* 🌙\n"
-                f"{DIV}\n\n"
-                f"📱 رقمك: `{user['phone']}`\n\n"
-                f"{fmt_card(v, n)}"
-                f"{notif_txt}\n\n"
-                f"{DIV3}\n"
-                f"_{datetime.now().strftime('%H:%M  ·  %d/%m/%Y')}_"
-            )
-            ctx.user_data["state"] = "main"
-            await update.message.reply_text(
-                welcome, parse_mode="Markdown", reply_markup=await get_main_kb(u.id)
-            )
-            return ST_MAIN
+        # اجيب بيانات محدثة من الـ DB مباشرة
+        fresh = await get_user(u.id)
+        if fresh and fresh.get("enc_password"):
+            token = await ensure_token(fresh)
+            if token:
+                fresh = await get_user(u.id)
+                v   = fresh.get("card_value", 0)
+                n   = fresh.get("card_units", 0)
+                unseen = await db_val(
+                    "SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND seen=0", u.id
+                ) or 0
+                notif_txt = f"\n🔔 *{unseen} إشعار جديد!*" if unseen else ""
+                welcome = (
+                    f"🌙 *رمضان كريم، {u.first_name}!* 🌙\n"
+                    f"{DIV}\n\n"
+                    f"📱 رقمك: `{fresh['phone']}`\n\n"
+                    f"{fmt_card(v, n)}"
+                    f"{notif_txt}\n\n"
+                    f"{DIV3}\n"
+                    f"_{datetime.now().strftime('%H:%M  ·  %d/%m/%Y')}_"
+                )
+                ctx.user_data["state"] = "main"
+                await update.message.reply_text(
+                    welcome, parse_mode="Markdown", reply_markup=await get_main_kb(u.id)
+                )
+                return ST_MAIN
     else:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔐 تسجيل الدخول", callback_data="do_login")],
