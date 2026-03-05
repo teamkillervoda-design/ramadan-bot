@@ -314,9 +314,9 @@ class VF:
         "clientId":                "AnaVodafoneAndroid",
         "Accept-Language":         "ar",
         "x-agent-device":          "Xiaomi 21061119AG",
-        "x-agent-version":         "2025.10.3",
+        "x-agent-version":         "2025.11.1",
         "x-agent-build":           "1050",
-        "digitalId":               "28RI9U7ISU8SW",
+        "digitalId":               "28RI9U7IINOOB",
         "device-id":               "1df4efae59648ac3",
     }
 
@@ -496,39 +496,42 @@ class VF:
     async def send_gift(cls, phone: str, token: str,
                         receiver: str, card_id, channel_id,
                         card_serial: str = None) -> tuple[bool, str]:
-        promo_url = f"{cls.WEB}/services/dxl/promo/promotion"
-        params    = {"@type": "Promo", "$.context.type": "nearbyRamadan26"}
+        url = f"{cls.WEB}/services/dxl/ramadanpromo/promotion"
+        headers = {
+            "Accept":             "application/json",
+            "Accept-Language":    "AR",
+            "Authorization":      f"Bearer {token}",
+            "Connection":         "keep-alive",
+            "Content-Type":       "application/json",
+            "Origin":             "https://web.vodafone.com.eg",
+            "Referer":            "https://web.vodafone.com.eg/portal/bf/rechargePromo",
+            "Sec-Fetch-Dest":     "empty",
+            "Sec-Fetch-Mode":     "cors",
+            "Sec-Fetch-Site":     "same-origin",
+            "User-Agent":         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+            "channel":            "WEB",
+            "clientId":           "WebsiteConsumer",
+            "msisdn":             phone,
+            "sec-ch-ua":          '"Chromium";v="137", "Not/A)Brand";v="24"',
+            "sec-ch-ua-mobile":   "?0",
+            "sec-ch-ua-platform": '"Linux"',
+            "x-dtpc":             "5$90742432_744h16vULSALMHSJUBASANRLVBBFCDPKOHDGNWO-0e0",
+        }
+        payload = {
+            "@type":   "Promo",
+            "channel": {"id": "4"},
+            "context": {"type": "RamdanCardDedication"},
+            "pattern": [{
+                "characteristics": [
+                    {"name": "BMsisdn", "value": receiver},
+                ]
+            }]
+        }
         try:
             async with aiohttp.ClientSession() as s:
-                async with s.get(promo_url, params=params,
-                                 headers=cls._h(token, phone),
-                                 timeout=aiohttp.ClientTimeout(total=15)) as r:
-                    if r.status != 200:
-                        return False, f"فشل جلب الكرت HTTP {r.status}"
-                    data = await r.json(content_type=None)
-
-            if not isinstance(data, list) or len(data) < 2:
-                return False, "لا يوجد كرت رمضان متاح"
-            item       = data[1]
-            fresh_id   = item.get("id") or card_id
-            fresh_ch   = (item.get("channel") or {}).get("id") or channel_id or "4"
-
-            payload = {
-                "@type":   "Promo",
-                "channel": {"id": str(fresh_ch)},
-                "context": {"type": "nearbyRamadan26"},
-                "pattern": [{
-                    "id": fresh_id,
-                    "characteristics": [
-                        {"name": "redemptionFlag", "value": "0"},
-                        {"name": "BMsisdn",        "value": receiver},
-                    ]
-                }]
-            }
-            async with aiohttp.ClientSession() as s:
-                async with s.post(promo_url,
-                                  data=json.dumps(payload),
-                                  headers=cls._h(token, phone),
+                async with s.post(url,
+                                  json=payload,
+                                  headers=headers,
                                   timeout=aiohttp.ClientTimeout(total=20)) as r:
                     text = await r.text()
                     log.info(f"send_gift {r.status}: {text[:300]}")
@@ -2937,3 +2940,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
