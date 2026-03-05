@@ -898,8 +898,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     # اجيب بيانات محدثة من الـ DB دايماً
     fresh = await get_user(u.id)
-    if fresh and fresh.get("phone") and fresh.get("enc_password") and fresh.get("logged_out") != 1:
-        token = await ensure_token(fresh)
+    if fresh and fresh.get("token") and fresh.get("token_expiry", 0) > time.time() and not fresh.get("logged_out"):
+        token = fresh.get("token")
         if token:
             fresh = await get_user(u.id)
             v   = fresh.get("card_value", 0)
