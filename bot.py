@@ -603,6 +603,8 @@ class VF:
 #                 تجديد التوكن
 # ══════════════════════════════════════════════════════
 async def ensure_token(user: dict) -> Optional[str]:
+    if user.get("logged_out"):
+        return None
     if user.get("token") and user.get("token_expiry", 0) > time.time() + 60:
         return user["token"]
     enc = user.get("enc_password")
