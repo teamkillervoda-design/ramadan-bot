@@ -17,6 +17,7 @@ import base64
 from datetime import datetime, timedelta
 from typing import Optional
 import aiohttp
+from aiohttp import web as aiohttp_web
 import aiosqlite
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -2666,7 +2667,7 @@ async def cmd_setdashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════
 API_SECRET = os.getenv("API_SECRET", "ramadan_api_2026")
 
-async def api_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+async def api_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
     """endpoint واحد بيرد على كل طلبات الداشبورد"""
 
     # CORS — لازم عشان Netlify تقدر تكلم Railway
@@ -2678,12 +2679,12 @@ async def api_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
     }
 
     if request.method == "OPTIONS":
-        return aiohttp.web.Response(status=200, headers=headers)
+        return aiohttp_web.Response(status=200, headers=headers)
 
     # التحقق من الـ secret
     secret = request.headers.get("X-Secret") or request.rel_url.query.get("secret")
     if secret != API_SECRET:
-        return aiohttp.web.Response(
+        return aiohttp_web.Response(
             text=json.dumps({"error": "unauthorized"}),
             status=401, headers=headers
         )
@@ -2759,7 +2760,7 @@ async def api_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
             data["all_users"]  = all_users
             data["all_trades"] = all_trades
 
-        return aiohttp.web.Response(
+        return aiohttp_web.Response(
             text=json.dumps(data, ensure_ascii=False, default=str),
             headers=headers
         )
@@ -2770,14 +2771,14 @@ async def api_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         if target:
             await db_run("UPDATE users SET banned=1 WHERE user_id=?", (target,))
             await db_run("UPDATE offers SET status='cancelled' WHERE user_id=? AND status='active'", (target,))
-        return aiohttp.web.Response(text=json.dumps({"ok": True}), headers=headers)
+        return aiohttp_web.Response(text=json.dumps({"ok": True}), headers=headers)
 
     # ── رفع حظر ──
     if action == "unban" and uid in ADMIN_IDS:
         target = int(body.get("target_uid", 0))
         if target:
             await db_run("UPDATE users SET banned=0 WHERE user_id=?", (target,))
-        return aiohttp.web.Response(text=json.dumps({"ok": True}), headers=headers)
+        return aiohttp_web.Response(text=json.dumps({"ok": True}), headers=headers)
 
     # ── إذاعة ──
     if action == "broadcast" and uid in ADMIN_IDS:
@@ -2792,9 +2793,9 @@ async def api_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
                     sent += 1
                 except: pass
                 await asyncio.sleep(0.05)
-        return aiohttp.web.Response(text=json.dumps({"ok": True, "sent": sent}), headers=headers)
+        return aiohttp_web.Response(text=json.dumps({"ok": True, "sent": sent}), headers=headers)
 
-    return aiohttp.web.Response(
+    return aiohttp_web.Response(
         text=json.dumps({"error": "unknown action"}),
         status=400, headers=headers
     )
@@ -2803,17 +2804,17 @@ async def api_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
 async def start_api_server(bot_instance):
     """يشغل الـ API server على البورت المطلوب"""
     port = int(os.getenv("PORT", 8080))
-    web_app = aiohttp.web.Application()
+    web_app = aiohttp_web.Application()
     web_app["bot"] = bot_instance
     web_app.router.add_route("*", "/api", api_handler)
     web_app.router.add_route("*", "/api/", api_handler)
     # Health check لـ Railway
-    async def health(_): return aiohttp.web.Response(text="OK")
+    async def health(_): return aiohttp_web.Response(text="OK")
     web_app.router.add_get("/", health)
 
-    runner = aiohttp.web.AppRunner(web_app)
+    runner = aiohttp_web.AppRunner(web_app)
     await runner.setup()
-    site = aiohttp.web.TCPSite(runner, "0.0.0.0", port)
+    site = aiohttp_web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     log.info(f"🌐 API Server شغال على port {port}")
     return runner
