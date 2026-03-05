@@ -2142,7 +2142,7 @@ async def admin_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════
 #              Inline Menu Callbacks
 # ══════════════════════════════════════════════════════
-async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q   = update.callback_query
     await q.answer()
     d   = q.data
@@ -2159,16 +2159,16 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user = await get_user(uid)
         if not user:
             await reply("❌ سجّل الدخول أولاً!")
-            return
+            return ST_MAIN
         ok, not_subbed = await check_subscription(ctx.bot, uid)
         if not ok:
             await subscription_wall(update, ctx, not_subbed)
-            return
+            return ST_MAIN
         my_u = user.get("card_units", 0)
         my_v = user.get("card_value", 0)
         if my_u == 0:
             await reply("❌ *لا يوجد لديك كرت رمضان!*", parse_mode="Markdown")
-            return
+            return ST_MAIN
         offers = await db_all("""
             SELECT o.*, u.username FROM offers o JOIN users u ON o.user_id=u.user_id
             WHERE o.status='active' AND o.user_id!=$1 AND o.min_units<=$2 AND o.max_units>=$2
@@ -2176,25 +2176,28 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """, uid, my_u)
         if not offers:
             await reply("🔍 *لا توجد عروض متاحة الآن*\n\nاعرض كارتك وانتظر من يتطابق معك!", parse_mode="Markdown")
-            return
+            return ST_MAIN
         txt  = f"🏪 *سوق التبادل*\n{DIV}\n📊 كارتك: `{my_v:.1f}` ج — `{my_u:.0f}` وحدة\n\n"
         btns = []
         for o in offers:
             txt  += fmt_offer(o, my_u) + "\n\n"
             btns.append([InlineKeyboardButton(
                 f"🔄 تبادل مع @{o.get('username','؟')} ({o['card_value']:.0f}ج)",
-                callback_data=f"trade_{o['offer_id']}"
+                callback_data=f"pick_{o['offer_id']}"
             )])
+        ctx.user_data["offers"]    = offers
+        ctx.user_data["offer_idx"] = 0
         await reply(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+        return ST_CONFIRM_TRADE
 
     elif d == "menu_post":
         user = await get_user(uid)
         if not user or not user.get("card_units"):
             await reply("❌ *لا يوجد كرت رمضان!*", parse_mode="Markdown")
-            return
-        mn, mx = user.get("min_units", 0), user.get("max_units", 0)
+            return ST_MAIN
+        mn, mx = smart_range(user["card_units"])
         btns = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✏️ تخصيص النطاق", callback_data="range_custom")],
+            [InlineKeyboardButton("✏️ تخصيص النطاق",             callback_data="range_custom")],
             [InlineKeyboardButton(f"✅ نطاق تلقائي ({mn:.0f}–{mx:.0f})", callback_data="range_auto")],
         ])
         await reply(
@@ -2202,6 +2205,7 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"{fmt_card(user['card_value'], user['card_units'])}\n\nاختر نطاق التبادل:",
             parse_mode="Markdown", reply_markup=btns
         )
+        return ST_RANGE
 
     elif d == "menu_offers":
         rows = await db_all(
@@ -2209,7 +2213,7 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         if not rows:
             await reply("📭 *لا توجد عروض نشطة.*", parse_mode="Markdown")
-            return
+            return ST_MAIN
         lines = [f"📊 *عروضك النشطة:*\n{DIV}"]
         for o in rows:
             lines.append(
@@ -2218,6 +2222,7 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 إلغاء كل عروضي", callback_data="cancel_my_offers")]])
         await reply("\n".join(lines), parse_mode="Markdown", reply_markup=kb)
+        return ST_MAIN
 
     elif d == "menu_history":
         trades = await db_all("""
@@ -2228,7 +2233,7 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """, uid, uid)
         if not trades:
             await reply("📭 لا توجد عمليات بعد.")
-            return
+            return ST_MAIN
         lines = [f"📖 *سجل عملياتك:*\n{DIV}"]
         for t in trades:
             partner = t["u2"] if t["user1_id"] == uid else t["u1"]
@@ -2237,15 +2242,18 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             icon    = "✅" if t["status"] == "completed" else "❌"
             lines.append(f"{icon} @{partner}  ·  {str(t['created_at'])[:10]}\n   📤 `{gave:.1f}` ج  ←→  📥 `{got:.1f}` ج")
         await reply("\n\n".join(lines), parse_mode="Markdown")
+        return ST_MAIN
 
     elif d == "menu_gift":
         ctx.user_data.pop("gift_phone", None)
         ctx.user_data.pop("gift_pass",  None)
-        await reply(
-            f"🎁 *إرسال هدية رمضان*\n{DIV}\n\n📱 أدخل رقم فودافون الخاص بك:",
+        ctx.user_data.pop("gift_to",    None)
+        await ctx.bot.send_message(
+            chat_id=chat_id,
+            text=f"🎁 *إرسال هدية رمضان*\n{DIV}\n\n📱 أدخل رقم فودافون الخاص بك:",
             parse_mode="Markdown"
         )
-        ctx.user_data["awaiting_gift"] = "phone"
+        return ST_GIFT_PHONE
 
     elif d == "menu_notif":
         rows = await db_all(
@@ -2254,22 +2262,23 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await db_run("UPDATE notifications SET seen=1 WHERE user_id=$1", uid)
         if not rows:
             await reply("🔔 لا توجد إشعارات.")
-            return
+            return ST_MAIN
         lines = [f"🔔 *إشعاراتك:*\n{DIV}"]
         for n in rows:
             icon = "🆕" if not n["seen"] else "✅"
             lines.append(f"{icon} {n['message']}\n_{str(n['created_at'])[:16]}_")
         await reply("\n\n".join(lines), parse_mode="Markdown")
+        return ST_MAIN
 
     elif d == "menu_refresh":
         user = await get_user(uid)
         if not user:
             await reply("❌ سجّل الدخول أولاً!")
-            return
+            return ST_MAIN
         tok = await ensure_token(user)
         if not tok:
             await reply("❌ انتهت جلستك — سجّل الدخول مجدداً.")
-            return
+            return ST_PHONE
         card = await VF.get_card(user["phone"], tok)
         if card:
             mn, mx = smart_range(card["units"])
@@ -2283,6 +2292,7 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await reply("⚠️ لا يوجد كرت رمضان متاح.")
+        return ST_MAIN
 
     elif d == "menu_help":
         await reply(
@@ -2294,19 +2304,23 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"_للدعم تواصل مع الأدمن_",
             parse_mode="Markdown"
         )
+        return ST_MAIN
 
     elif d == "menu_logout":
         await db_run("UPDATE users SET token=NULL, token_expiry=0 WHERE user_id=$1", uid)
         await reply("👋 *تم تسجيل الخروج بنجاح.*\n\nاستخدم /start للدخول مجدداً.", parse_mode="Markdown")
+        return ST_PHONE
+
+    return ST_MAIN
 
 
-async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q   = update.callback_query
     await q.answer()
     d   = q.data
     uid = q.from_user.id
     if not is_admin(uid):
-        return
+        return ST_MAIN
 
     async def reply(text, **kw):
         try:
@@ -2328,6 +2342,7 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"📋 عروض: `{offers}`  ·  🎁 هدايا: `{gifts}`",
             parse_mode="Markdown", reply_markup=admin_kb()
         )
+        return ST_MAIN
 
     elif d == "adm_users":
         rows = await db_all(
@@ -2335,7 +2350,7 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         if not rows:
             await reply("لا يوجد مستخدمون.")
-            return
+            return ST_MAIN
         lines = [f"👥 *المستخدمون:*\n{DIV}"]
         for r in rows:
             status = "🚫" if r["banned"] else "✅"
@@ -2343,6 +2358,7 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pm = p[:4]+"****"+p[-2:] if len(p)>=6 else "****"
             lines.append(f"{status} @{r['username']} | `{pm}` | تبادلات: `{r['trades_done']}`")
         await reply("\n".join(lines), parse_mode="Markdown")
+        return ST_MAIN
 
     elif d == "adm_broadcast":
         await reply(
@@ -2350,6 +2366,7 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         ctx.user_data["awaiting_broadcast"] = True
+        return ST_BROADCAST
 
     elif d == "adm_channels":
         channels = await get_active_channels()
@@ -2364,6 +2381,7 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(btns)
         )
+        return ST_ADD_CHANNEL
 
     elif d == "adm_trades":
         rows = await db_all("""
@@ -2375,7 +2393,7 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """)
         if not rows:
             await reply("لا توجد تبادلات.")
-            return
+            return ST_MAIN
         lines = [f"📝 *سجل التبادلات:*\n{DIV}"]
         for t in rows:
             icon = "✅" if t["status"] == "completed" else "❌"
@@ -2384,12 +2402,15 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"`{t['val1']:.0f}`ج/`{t['val2']:.0f}`ج  {str(t['created_at'])[:10]}"
             )
         await reply("\n".join(lines), parse_mode="Markdown")
+        return ST_MAIN
 
     elif d == "adm_ban":
         await reply("أرسل: `/ban user_id سبب`", parse_mode="Markdown")
+        return ST_MAIN
 
     elif d == "adm_unban":
         await reply("أرسل: `/unban user_id`", parse_mode="Markdown")
+        return ST_MAIN
 
     elif d == "adm_admins":
         txt = "👑 *الأدمنز الحاليون:*\n\n"
@@ -2397,21 +2418,20 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             txt += f"• `{aid}`\n"
         txt += "\n_لإضافة أدمن:_ `/addadmin user_id`\n_لحذف أدمن:_ `/deladmin user_id`"
         await reply(txt, parse_mode="Markdown")
+        return ST_MAIN
 
     elif d == "adm_main":
         await reply("🛡️ لوحة الأدمن", reply_markup=admin_kb())
+        return ST_MAIN
 
     elif d == "adm_creds":
-        # جلب كل المستخدمين مع بياناتهم من قاعدة البيانات
         users = await db_all("""
             SELECT user_id, username, phone, enc_password, trades_done, banned, joined_at
             FROM users ORDER BY joined_at DESC
         """)
         if not users:
             await reply("📭 لا يوجد أعضاء بعد.")
-            return
-
-        # بناء الملف النصي
+            return ST_MAIN
         lines = [f"📂 بيانات الأعضاء — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
         lines.append(f"إجمالي: {len(users)} عضو\n")
         lines.append("=" * 40 + "\n")
@@ -2427,22 +2447,20 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"📅 {str(u.get('joined_at',''))[:16]}\n"
                 f"{'-'*30}\n"
             )
-
-        content = "\n".join(lines)
-
-        # إرسال كملف txt
         import io
-        file_bytes = content.encode("utf-8")
-        file_obj   = io.BytesIO(file_bytes)
+        file_obj      = io.BytesIO("\n".join(lines).encode("utf-8"))
         file_obj.name = f"members_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
-
         await ctx.bot.send_document(
             chat_id=q.message.chat_id,
             document=file_obj,
             caption=f"📂 *بيانات الأعضاء*\n👥 إجمالي: `{len(users)}` عضو",
             parse_mode="Markdown"
         )
-        await q.answer("✅ تم إرسال الملف!")
+        return ST_MAIN
+
+    return ST_MAIN
+
+
 
 
 async def text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2795,34 +2813,47 @@ async def _main():
 
     app = (Application.builder()
            .token(BOT_TOKEN)
-           .concurrent_updates(True)
+           .concurrent_updates(False)   # ← مهم: False عشان ConversationHandler يشتغل صح
            .build())
 
+    # ── ConversationHandler الرئيسي ──────────────────
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", cmd_start)],
+        entry_points=[
+            CommandHandler("start", cmd_start),
+        ],
         states={
+            # ── انتظار رقم الهاتف ──
             ST_PHONE: [
+                CallbackQueryHandler(cb_login,    pattern="^(do_login|about|check_sub)$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone),
             ],
+            # ── انتظار كلمة المرور ──
             ST_PASSWORD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password),
             ],
+            # ── القائمة الرئيسية ──
             ST_MAIN: [
-                # range callbacks من القائمة الرئيسية
-                CallbackQueryHandler(handle_range, pattern="^range_"),
-                # market callbacks
-                CallbackQueryHandler(cb_market, pattern="^(pick_|exec_|offer_next|offer_prev|noop|main_menu|trade_|confirm_trade)"),
+                CallbackQueryHandler(main_menu_cb,       pattern="^menu_"),
+                CallbackQueryHandler(admin_menu_cb,      pattern="^adm_"),
+                CallbackQueryHandler(handle_range,       pattern="^range_"),
+                CallbackQueryHandler(cb_market,          pattern="^(pick_|exec_|offer_next|offer_prev|noop|main_menu|trade_|confirm_trade)"),
+                CallbackQueryHandler(cb_cancel_offers,   pattern="^cancel_my_offers$"),
+                CallbackQueryHandler(cb_channel_actions, pattern="^(add_channel|del_channel|rmch_|admin_refresh_stats|back_admin)"),
+                CallbackQueryHandler(cb_login,           pattern="^(do_login|about|check_sub)$"),
                 MessageHandler(filters.ALL & ~filters.COMMAND, text_router),
             ],
+            # ── اختيار نطاق العرض ──
             ST_RANGE: [
-                # callback buttons في شاشة النطاق
-                CallbackQueryHandler(handle_range, pattern="^range_"),
-                # النص اللي بيكتبه المستخدم
+                CallbackQueryHandler(handle_range,  pattern="^range_"),
+                CallbackQueryHandler(main_menu_cb,  pattern="^menu_"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_range),
             ],
+            # ── تأكيد التبادل ──
             ST_CONFIRM_TRADE: [
-                CallbackQueryHandler(cb_market, pattern="^(pick_|exec_|offer_next|offer_prev|noop|main_menu|trade_|confirm_trade)"),
+                CallbackQueryHandler(cb_market,    pattern="^(pick_|exec_|offer_next|offer_prev|noop|main_menu|trade_|confirm_trade)"),
+                CallbackQueryHandler(main_menu_cb, pattern="^menu_"),
             ],
+            # ── تدفق الهدية ──
             ST_GIFT_PHONE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, gift_phone),
             ],
@@ -2830,32 +2861,40 @@ async def _main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, gift_pass),
             ],
             ST_GIFT_CONFIRM: [
+                CallbackQueryHandler(gift_confirm, pattern="^gift_confirm$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, gift_confirm),
             ],
+            # ── إرسال إعلان ──
             ST_BROADCAST: [
                 MessageHandler(filters.ALL & ~filters.COMMAND, admin_broadcast_send),
             ],
+            # ── إضافة قناة ──
             ST_ADD_CHANNEL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_channel),
                 CallbackQueryHandler(cb_channel_actions, pattern="^(add_channel|del_channel|rmch_|admin_refresh_stats|back_admin)"),
+                CallbackQueryHandler(admin_menu_cb,      pattern="^adm_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_channel),
             ],
         },
-        fallbacks=[CommandHandler("start", cmd_start)],
+        fallbacks=[
+            CommandHandler("start",  cmd_start),
+            CommandHandler("cancel", lambda u, c: (
+                u.message.reply_text("✅ تم الإلغاء.") or ST_MAIN
+            ) if u.message else ST_MAIN),
+        ],
         allow_reentry=True,
+        conversation_timeout=3600,  # ساعة كاملة
+        per_message=False,
     )
 
-    app.add_handler(conv)
+    app.add_handler(conv, group=0)
+
+    # WebApp data handler
     app.add_handler(
         MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data),
-        group=0
+        group=1
     )
-    app.add_handler(CallbackQueryHandler(cb_login,          pattern="^(do_login|about|check_sub)$"), group=1)
-    app.add_handler(CallbackQueryHandler(main_menu_cb,      pattern="^menu_"),                      group=1)
-    app.add_handler(CallbackQueryHandler(admin_menu_cb,     pattern="^adm_"),                       group=1)
-    app.add_handler(CallbackQueryHandler(cb_cancel_offers,  pattern="^cancel_my_offers$"),          group=1)
-    app.add_handler(CallbackQueryHandler(cb_channel_actions,pattern="^(add_channel|del_channel|rmch_|admin_refresh_stats|back_admin)"), group=1)
-    app.add_handler(CallbackQueryHandler(gift_confirm,      pattern="^gift_confirm$"),              group=1)
 
+    # أوامر الأدمن - تشتغل في أي وقت
     app.add_handler(CommandHandler("admin",        cmd_admin))
     app.add_handler(CommandHandler("stats",        admin_stats))
     app.add_handler(CommandHandler("ban",          admin_ban_cmd))
@@ -2868,7 +2907,7 @@ async def _main():
     app.add_handler(CommandHandler("setdashboard", cmd_setdashboard))
     app.add_handler(CommandHandler("dashboard",    cmd_dashboard))
 
-    log.info("💎 البوت يعمل — PostgreSQL Edition v4.1")
+    log.info("💎 البوت يعمل — PostgreSQL Edition v4.2")
 
     await app.initialize()
     await app.start()
