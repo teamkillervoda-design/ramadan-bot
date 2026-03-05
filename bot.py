@@ -136,6 +136,7 @@ async def init_db():
                 ban_reason    TEXT,
                 notify        INTEGER DEFAULT 1,
                 dashboard_url TEXT,
+                logged_out    INTEGER DEFAULT 0,
                 joined_at     TIMESTAMP DEFAULT NOW(),
                 last_seen     TIMESTAMP DEFAULT NOW()
             )
@@ -210,6 +211,10 @@ async def init_db():
                 fail_count  INTEGER DEFAULT 0,
                 created_at  TIMESTAMP DEFAULT NOW()
             )
+        """)
+        # إضافة columns جديدة لو مش موجودة
+        await conn.execute("""
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS logged_out INTEGER DEFAULT 0
         """)
     log.info("✅ قاعدة البيانات PostgreSQL جاهزة")
 
@@ -887,10 +892,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         ctx.user_data["state"] = "phone"
         return ST_PHONE
 
-    if user and user.get("phone") and user.get("enc_password"):
+    if user and user.get("phone") and user.get("enc_password") and not user.get("logged_out"):
         # اجيب بيانات محدثة من الـ DB مباشرة
         fresh = await get_user(u.id)
-        if fresh and fresh.get("enc_password"):
+        if fresh and fresh.get("enc_password") and not fresh.get("logged_out"):
             token = await ensure_token(fresh)
             if token:
                 fresh = await get_user(u.id)
@@ -1114,6 +1119,7 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
                 min_units=EXCLUDED.min_units,
                 max_units=EXCLUDED.max_units,
                 fail_count=0,
+                logged_out=0,
                 last_seen=NOW()
         """,
             u.id, u.username or u.first_name, phone,
@@ -1849,7 +1855,7 @@ async def cmd_refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 async def logout(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
     await db_run(
-        "UPDATE users SET token=NULL, token_expiry=0, enc_password=NULL WHERE user_id=$1",
+        "UPDATE users SET token=NULL, token_expiry=0, logged_out=1 WHERE user_id=$1",
         uid
     )
     ctx.user_data.clear()
