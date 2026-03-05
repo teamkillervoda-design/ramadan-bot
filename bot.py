@@ -603,7 +603,9 @@ class VF:
 #                 تجديد التوكن
 # ══════════════════════════════════════════════════════
 async def ensure_token(user: dict) -> Optional[str]:
-    if user.get("logged_out"):
+    if user.get("logged_out") == 1:
+        return None
+    if not user.get("token") and not user.get("enc_password"):
         return None
     if user.get("token") and user.get("token_expiry", 0) > time.time() + 60:
         return user["token"]
@@ -894,33 +896,32 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         ctx.user_data["state"] = "phone"
         return ST_PHONE
 
-    if user and user.get("phone") and user.get("enc_password") and not user.get("logged_out"):
-        # اجيب بيانات محدثة من الـ DB مباشرة
-        fresh = await get_user(u.id)
-        if fresh and fresh.get("enc_password") and not fresh.get("logged_out"):
-            token = await ensure_token(fresh)
-            if token:
-                fresh = await get_user(u.id)
-                v   = fresh.get("card_value", 0)
-                n   = fresh.get("card_units", 0)
-                unseen = await db_val(
-                    "SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND seen=0", u.id
-                ) or 0
-                notif_txt = f"\n🔔 *{unseen} إشعار جديد!*" if unseen else ""
-                welcome = (
-                    f"🌙 *رمضان كريم، {u.first_name}!* 🌙\n"
-                    f"{DIV}\n\n"
-                    f"📱 رقمك: `{fresh['phone']}`\n\n"
-                    f"{fmt_card(v, n)}"
-                    f"{notif_txt}\n\n"
-                    f"{DIV3}\n"
-                    f"_{datetime.now().strftime('%H:%M  ·  %d/%m/%Y')}_"
-                )
-                ctx.user_data["state"] = "main"
-                await update.message.reply_text(
-                    welcome, parse_mode="Markdown", reply_markup=await get_main_kb(u.id)
-                )
-                return ST_MAIN
+    # اجيب بيانات محدثة من الـ DB دايماً
+    fresh = await get_user(u.id)
+    if fresh and fresh.get("phone") and fresh.get("enc_password") and fresh.get("logged_out") != 1:
+        token = await ensure_token(fresh)
+        if token:
+            fresh = await get_user(u.id)
+            v   = fresh.get("card_value", 0)
+            n   = fresh.get("card_units", 0)
+            unseen = await db_val(
+                "SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND seen=0", u.id
+            ) or 0
+            notif_txt = f"\n🔔 *{unseen} إشعار جديد!*" if unseen else ""
+            welcome = (
+                f"🌙 *رمضان كريم، {u.first_name}!* 🌙\n"
+                f"{DIV}\n\n"
+                f"📱 رقمك: `{fresh['phone']}`\n\n"
+                f"{fmt_card(v, n)}"
+                f"{notif_txt}\n\n"
+                f"{DIV3}\n"
+                f"_{datetime.now().strftime('%H:%M  ·  %d/%m/%Y')}_"
+            )
+            ctx.user_data["state"] = "main"
+            await update.message.reply_text(
+                welcome, parse_mode="Markdown", reply_markup=await get_main_kb(u.id)
+            )
+            return ST_MAIN
     else:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔐 تسجيل الدخول", callback_data="do_login")],
@@ -1860,6 +1861,8 @@ async def logout(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         "UPDATE users SET token=NULL, token_expiry=0, logged_out=1 WHERE user_id=$1",
         uid
     )
+    # تأكيد إن التحديث اتعمل
+    log.info(f"logout user {uid}: token cleared, logged_out=1")
     ctx.user_data.clear()
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("🔐 تسجيل الدخول مجدداً", callback_data="do_login")
