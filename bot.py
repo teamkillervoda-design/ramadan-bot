@@ -1847,7 +1847,10 @@ async def cmd_refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 # ══════════════════════════════════════════════════════
 async def logout(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
-    await db_run("UPDATE users SET token=NULL, token_expiry=0 WHERE user_id=$1", uid)
+    await db_run(
+        "UPDATE users SET token=NULL, token_expiry=0, enc_password=NULL WHERE user_id=$1",
+        uid
+    )
     ctx.user_data.clear()
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("🔐 تسجيل الدخول مجدداً", callback_data="do_login")
