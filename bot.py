@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 ╔══════════════════════════════════════════════════════╗
-║   💎 بوت تبادل كروت رمضان فودافون — النسخة 4.0     ║
-║         مع داشبورد WebApp مدمج داخل التيليجرام       ║
+║   💎 بوت تبادل كروت رمضان فودافون — النسخة 4.1     ║
+║         PostgreSQL Edition — Railway Ready           ║
 ╚══════════════════════════════════════════════════════╝
 """
 
@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import aiohttp
 from aiohttp import web as aiohttp_web
-import aiosqlite
+import asyncpg
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     ReplyKeyboardMarkup, KeyboardButton, ChatMember,
@@ -37,14 +37,19 @@ from telegram.error import TelegramError
 BOT_TOKEN  = os.getenv("BOT_TOKEN",  "8461997379:AAH2Jhw_P4TlNa2dmGkmf9MPnFe8k-Pd2Z4")
 _ADMIN_IDS_DEFAULT = list(map(int, os.getenv("ADMIN_IDS", "7804343757").split(",")))
 ADMIN_IDS: list = list(_ADMIN_IDS_DEFAULT)
-DB_PATH    = "ramadan_bot.db"
+
+# ✅ PostgreSQL — استخدم DATABASE_URL من Railway
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:oeqUqhdfefIOewReKWoKsoZXmtlOXepf@postgres.railway.internal:5432/railway"
+)
+
 OFFER_TTL  = 60
 MAX_FAILS  = 3
 MIN_VALUE  = 200
 
 _ENC_KEY = os.getenv("ENC_KEY", "ramadan_2026_secret_key_vf")
 
-# رابط صفحة الداشبورد — سيُضبط تلقائياً من البوت
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "")
 
 REQUIRED_CHANNELS = []
@@ -96,135 +101,157 @@ for _lib in ("httpx", "aiohttp", "telegram", "apscheduler", "asyncio"):
 log = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════
-#                   قاعدة البيانات
+#            قاعدة البيانات — PostgreSQL
 # ══════════════════════════════════════════════════════
+
+# Pool عالمي — يُنشأ مرة واحدة عند البدء
+_pool: Optional[asyncpg.Pool] = None
+
+async def get_pool() -> asyncpg.Pool:
+    global _pool
+    if _pool is None:
+        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    return _pool
+
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.executescript("""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id       INTEGER PRIMARY KEY,
+                user_id       BIGINT PRIMARY KEY,
                 username      TEXT,
                 phone         TEXT UNIQUE,
                 enc_password  TEXT,
                 token         TEXT,
-                token_expiry  REAL DEFAULT 0,
-                card_value    REAL DEFAULT 0,
-                card_units    REAL DEFAULT 0,
+                token_expiry  DOUBLE PRECISION DEFAULT 0,
+                card_value    DOUBLE PRECISION DEFAULT 0,
+                card_units    DOUBLE PRECISION DEFAULT 0,
                 card_id       TEXT,
                 channel_id    TEXT,
                 card_serial   TEXT,
-                min_units     REAL DEFAULT 0,
-                max_units     REAL DEFAULT 0,
+                min_units     DOUBLE PRECISION DEFAULT 0,
+                max_units     DOUBLE PRECISION DEFAULT 0,
                 trades_done   INTEGER DEFAULT 0,
                 fail_count    INTEGER DEFAULT 0,
                 banned        INTEGER DEFAULT 0,
                 ban_reason    TEXT,
                 notify        INTEGER DEFAULT 1,
-                joined_at     TEXT DEFAULT CURRENT_TIMESTAMP,
-                last_seen     TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
+                dashboard_url TEXT,
+                joined_at     TIMESTAMP DEFAULT NOW(),
+                last_seen     TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS offers (
-                offer_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id     INTEGER NOT NULL,
-                card_value  REAL,
-                card_units  REAL,
-                min_units   REAL,
-                max_units   REAL,
+                offer_id    SERIAL PRIMARY KEY,
+                user_id     BIGINT NOT NULL,
+                card_value  DOUBLE PRECISION,
+                card_units  DOUBLE PRECISION,
+                min_units   DOUBLE PRECISION,
+                max_units   DOUBLE PRECISION,
                 status      TEXT DEFAULT 'active',
-                created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
-                expires_at  TEXT,
+                created_at  TIMESTAMP DEFAULT NOW(),
+                expires_at  TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
-            );
-
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (
-                trade_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                user1_id      INTEGER,
-                user2_id      INTEGER,
-                val1          REAL,
-                val2          REAL,
-                units1        REAL,
-                units2        REAL,
+                trade_id      SERIAL PRIMARY KEY,
+                user1_id      BIGINT,
+                user2_id      BIGINT,
+                val1          DOUBLE PRECISION,
+                val2          DOUBLE PRECISION,
+                units1        DOUBLE PRECISION,
+                units2        DOUBLE PRECISION,
                 status        TEXT DEFAULT 'pending',
                 fail_reason   TEXT,
-                created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
-                done_at       TEXT
-            );
-
+                created_at    TIMESTAMP DEFAULT NOW(),
+                done_at       TIMESTAMP
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS gifts (
-                gift_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                sender_id    INTEGER,
+                gift_id      SERIAL PRIMARY KEY,
+                sender_id    BIGINT,
                 receiver     TEXT,
-                amount       REAL,
+                amount       DOUBLE PRECISION,
                 status       TEXT DEFAULT 'pending',
-                created_at   TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
+                created_at   TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS notifications (
-                notif_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id    INTEGER,
+                notif_id   SERIAL PRIMARY KEY,
+                user_id    BIGINT,
                 message    TEXT,
                 seen       INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS channels (
-                channel_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id   SERIAL PRIMARY KEY,
                 chat_id      TEXT UNIQUE NOT NULL,
                 title        TEXT,
                 username     TEXT,
                 invite_link  TEXT,
                 is_active    INTEGER DEFAULT 1,
-                added_at     TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
+                added_at     TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS broadcasts (
-                bc_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                admin_id    INTEGER,
+                bc_id       SERIAL PRIMARY KEY,
+                admin_id    BIGINT,
                 message     TEXT,
                 media_type  TEXT,
                 media_id    TEXT,
                 sent_count  INTEGER DEFAULT 0,
                 fail_count  INTEGER DEFAULT 0,
-                created_at  TEXT DEFAULT CURRENT_TIMESTAMP
-            );
+                created_at  TIMESTAMP DEFAULT NOW()
+            )
         """)
-        await db.commit()
-        migrations = [
-            ("enc_password",   "TEXT"),
-            ("card_serial",    "TEXT"),
-            ("ban_reason",     "TEXT"),
-            ("dashboard_url",  "TEXT"),
-        ]
-        for col, dfn in migrations:
-            try:
-                await db.execute(f"ALTER TABLE users ADD COLUMN {col} {dfn}")
-                await db.commit()
-            except:
-                pass
+    log.info("✅ قاعدة البيانات PostgreSQL جاهزة")
 
-async def db_get(query: str, params: tuple = ()) -> Optional[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(query, params) as cur:
-            row = await cur.fetchone()
-            return dict(row) if row else None
+# ── helpers ──────────────────────────────────────────
+# asyncpg يرجع Record objects، نحوّلها لـ dict يدوياً
 
-async def db_all(query: str, params: tuple = ()) -> list:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(query, params) as cur:
-            rows = await cur.fetchall()
-            return [dict(r) for r in rows]
+def _row(r) -> Optional[dict]:
+    return dict(r) if r else None
 
-async def db_run(query: str, params: tuple = ()):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(query, params)
-        await db.commit()
+def _rows(rs) -> list:
+    return [dict(r) for r in rs]
+
+async def db_get(query: str, *params) -> Optional[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        r = await conn.fetchrow(query, *params)
+        return _row(r)
+
+async def db_all(query: str, *params) -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rs = await conn.fetch(query, *params)
+        return _rows(rs)
+
+async def db_run(query: str, *params):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(query, *params)
+
+async def db_val(query: str, *params):
+    """يرجع قيمة واحدة (أول عمود من أول صف)"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(query, *params)
+
+# ── Upsert helper (بيعوّض ON CONFLICT ... DO UPDATE) ─
+# PostgreSQL يدعم ON CONFLICT مباشرة، بس بنكتبه بـ $1,$2,... بدل ?
 
 async def get_user(user_id: int) -> Optional[dict]:
     return await db_get(
-        "SELECT * FROM users WHERE user_id=? AND banned=0", (user_id,)
+        "SELECT * FROM users WHERE user_id=$1 AND banned=0", user_id
     )
 
 async def get_active_channels() -> list:
@@ -376,7 +403,7 @@ class VF:
             "Sec-Fetch-Dest":   "empty",
             "Sec-Fetch-Mode":   "cors",
             "Sec-Fetch-Site":   "same-origin",
-            "User-Agent":       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+            "User-Agent":       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
             "channel":          "APP_PORTAL",
             "clientId":         "WebsiteConsumer",
             "msisdn":           phone,
@@ -561,8 +588,8 @@ async def ensure_token(user: dict) -> Optional[str]:
         return None
     expiry = time.time() + 3500
     await db_run(
-        "UPDATE users SET token=?, token_expiry=? WHERE user_id=?",
-        (new_token, expiry, user["user_id"])
+        "UPDATE users SET token=$1, token_expiry=$2 WHERE user_id=$3",
+        new_token, expiry, user["user_id"]
     )
     user["token"]        = new_token
     user["token_expiry"] = expiry
@@ -581,7 +608,6 @@ LANTERN  = "🪔"
 CRESCENT = "☪️"
 
 def main_kb(uid: int = 0, dashboard_url: str = "") -> InlineKeyboardMarkup:
-    """القائمة الرئيسية — لو عند المستخدم رابط داشبورد محفوظ يظهر الزرار"""
     rows = []
     url = dashboard_url or DASHBOARD_URL
     if url:
@@ -603,13 +629,11 @@ def main_kb(uid: int = 0, dashboard_url: str = "") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 async def get_main_kb(uid: int) -> InlineKeyboardMarkup:
-    """يجيب القائمة الرئيسية مع رابط الداشبورد المحفوظ للمستخدم"""
-    row = await db_get("SELECT dashboard_url FROM users WHERE user_id=?", (uid,))
+    row = await db_get("SELECT dashboard_url FROM users WHERE user_id=$1", uid)
     stored_url = row["dashboard_url"] if row and row.get("dashboard_url") else ""
     return main_kb(uid, stored_url)
 
-
-
+def admin_kb() -> InlineKeyboardMarkup:
     rows = []
     if DASHBOARD_URL:
         rows.append([InlineKeyboardButton(
@@ -662,17 +686,17 @@ def smart_range(units: float) -> tuple:
     return max(units - margin, 100), units + margin
 
 # ══════════════════════════════════════════════════════
-#        إحصائيات (مشتركة بين API والبوت)
+#        إحصائيات
 # ══════════════════════════════════════════════════════
 async def api_stats():
-    total      = (await db_get("SELECT COUNT(*) c FROM users"))["c"]
-    active     = (await db_get("SELECT COUNT(*) c FROM users WHERE token IS NOT NULL AND token_expiry > ?", (time.time(),)))["c"]
-    offers     = (await db_get("SELECT COUNT(*) c FROM offers WHERE status='active'"))["c"]
-    t_ok       = (await db_get("SELECT COUNT(*) c FROM trades WHERE status='completed'"))["c"]
-    t_fail     = (await db_get("SELECT COUNT(*) c FROM trades WHERE status='failed'"))["c"]
-    gifts      = (await db_get("SELECT COUNT(*) c FROM gifts WHERE status='completed'"))["c"]
-    today_u    = (await db_get("SELECT COUNT(*) c FROM users WHERE DATE(joined_at)=DATE('now')"))["c"]
-    today_t    = (await db_get("SELECT COUNT(*) c FROM trades WHERE DATE(created_at)=DATE('now') AND status='completed'"))["c"]
+    total   = await db_val("SELECT COUNT(*) FROM users") or 0
+    active  = await db_val("SELECT COUNT(*) FROM users WHERE token IS NOT NULL AND token_expiry > $1", time.time()) or 0
+    offers  = await db_val("SELECT COUNT(*) FROM offers WHERE status='active'") or 0
+    t_ok    = await db_val("SELECT COUNT(*) FROM trades WHERE status='completed'") or 0
+    t_fail  = await db_val("SELECT COUNT(*) FROM trades WHERE status='failed'") or 0
+    gifts   = await db_val("SELECT COUNT(*) FROM gifts WHERE status='completed'") or 0
+    today_u = await db_val("SELECT COUNT(*) FROM users WHERE DATE(joined_at)=CURRENT_DATE") or 0
+    today_t = await db_val("SELECT COUNT(*) FROM trades WHERE DATE(created_at)=CURRENT_DATE AND status='completed'") or 0
     return {
         "total_users": total, "active_users": active,
         "active_offers": offers,
@@ -682,40 +706,31 @@ async def api_stats():
     }
 
 # ══════════════════════════════════════════════════════
-#          WebApp Handler — قلب الداشبورد
+#          WebApp Handler
 # ══════════════════════════════════════════════════════
 async def handle_webapp_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """يستقبل طلبات الداشبورد ويرد بالبيانات مباشرة من قاعدة البيانات"""
     uid      = update.effective_user.id
     data_str = update.effective_message.web_app_data.data
-
     try:
         data = json.loads(data_str)
     except:
         return
-
     action = data.get("action")
 
-    # ── جلب كل بيانات الداشبورد ──
     if action == "get_dashboard":
-        user     = await db_get("SELECT * FROM users WHERE user_id=?", (uid,))
+        user     = await db_get("SELECT * FROM users WHERE user_id=$1", uid)
         is_admin = uid in ADMIN_IDS
-
-        # عروض المستخدم
         my_offers = await db_all(
-            "SELECT * FROM offers WHERE user_id=? ORDER BY created_at DESC LIMIT 10", (uid,)
+            "SELECT * FROM offers WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10", uid
         )
-
-        # سجل تبادلات المستخدم
         my_trades_raw = await db_all("""
             SELECT t.*, u1.username as n1, u2.username as n2
             FROM trades t
             LEFT JOIN users u1 ON t.user1_id=u1.user_id
             LEFT JOIN users u2 ON t.user2_id=u2.user_id
-            WHERE t.user1_id=? OR t.user2_id=?
+            WHERE t.user1_id=$1 OR t.user2_id=$2
             ORDER BY t.created_at DESC LIMIT 20
-        """, (uid, uid))
-
+        """, uid, uid)
         my_trades = []
         for t in my_trades_raw:
             is1 = t["user1_id"] == uid
@@ -724,19 +739,16 @@ async def handle_webapp_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "gave":       t["val1"] if is1 else t["val2"],
                 "got":        t["val2"] if is1 else t["val1"],
                 "status":     t["status"],
-                "created_at": t["created_at"],
+                "created_at": str(t["created_at"]),
             })
-
-        # عروض السوق المتوافقة
         my_units = user["card_units"] if user else 0
         market = await db_all("""
             SELECT o.*, u.username
             FROM offers o JOIN users u ON o.user_id=u.user_id
-            WHERE o.status='active' AND o.user_id!=?
-              AND datetime(o.expires_at)>datetime('now')
-            ORDER BY ABS(o.card_units - ?) ASC LIMIT 20
-        """, (uid, my_units))
-
+            WHERE o.status='active' AND o.user_id!=$1
+              AND o.expires_at > NOW()
+            ORDER BY ABS(o.card_units - $2) ASC LIMIT 20
+        """, uid, my_units)
         response = {
             "type":      "dashboard_data",
             "is_admin":  is_admin,
@@ -745,21 +757,17 @@ async def handle_webapp_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "my_trades": my_trades,
             "market":    market,
         }
-
-        # بيانات الأدمن الإضافية
         if is_admin:
             stats     = await api_stats()
             all_users = await db_all("""
                 SELECT user_id, username, phone, card_value, card_units,
                        trades_done, banned, last_seen,
-                       CASE WHEN token_expiry > ? THEN 1 ELSE 0 END as online
+                       CASE WHEN token_expiry > $1 THEN 1 ELSE 0 END as online
                 FROM users ORDER BY trades_done DESC LIMIT 100
-            """, (time.time(),))
-            # إخفاء جزء من الرقم
+            """, time.time())
             for u in all_users:
                 p = u.get("phone", "")
                 u["phone"] = p[:4] + "****" + p[-2:] if len(p) >= 6 else "****"
-
             all_trades = await db_all("""
                 SELECT t.trade_id, t.val1, t.val2, t.status, t.created_at,
                        u1.username as user1, u2.username as user2
@@ -768,53 +776,40 @@ async def handle_webapp_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 LEFT JOIN users u2 ON t.user2_id=u2.user_id
                 ORDER BY t.created_at DESC LIMIT 50
             """)
-
             response["stats"]      = stats
             response["all_users"]  = all_users
             response["all_trades"] = all_trades
-
-        # إرسال البيانات للـ WebApp
         await ctx.bot.send_message(
             uid,
             json.dumps(response, ensure_ascii=False, default=str),
         )
         return
 
-    # ── حظر مستخدم (أدمن فقط) ──
     if action == "ban" and uid in ADMIN_IDS:
         target = data.get("uid")
         if target:
             target = int(target)
-            await db_run("UPDATE users SET banned=1 WHERE user_id=?", (target,))
-            await db_run(
-                "UPDATE offers SET status='cancelled' WHERE user_id=? AND status='active'",
-                (target,)
-            )
-            await update.effective_message.reply_text(
-                f"✅ *تم حظر* `{target}`", parse_mode="Markdown"
-            )
+            await db_run("UPDATE users SET banned=1 WHERE user_id=$1", target)
+            await db_run("UPDATE offers SET status='cancelled' WHERE user_id=$1 AND status='active'", target)
+            await update.effective_message.reply_text(f"✅ *تم حظر* `{target}`", parse_mode="Markdown")
             try:
                 await ctx.bot.send_message(target, "🚫 *تم حظر حسابك.*", parse_mode="Markdown")
             except:
                 pass
         return
 
-    # ── رفع حظر (أدمن فقط) ──
     if action == "unban" and uid in ADMIN_IDS:
         target = data.get("uid")
         if target:
             target = int(target)
-            await db_run("UPDATE users SET banned=0, ban_reason=NULL WHERE user_id=?", (target,))
-            await update.effective_message.reply_text(
-                f"✅ *تم رفع الحظر عن* `{target}`", parse_mode="Markdown"
-            )
+            await db_run("UPDATE users SET banned=0, ban_reason=NULL WHERE user_id=$1", target)
+            await update.effective_message.reply_text(f"✅ *تم رفع الحظر عن* `{target}`", parse_mode="Markdown")
             try:
                 await ctx.bot.send_message(target, "✅ *تم رفع الحظر، يمكنك الاستخدام مجدداً.*", parse_mode="Markdown")
             except:
                 pass
         return
 
-    # ── إذاعة (أدمن فقط) ──
     if action == "broadcast" and uid in ADMIN_IDS:
         msg_text = data.get("message", "").strip()
         if not msg_text:
@@ -822,9 +817,7 @@ async def handle_webapp_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         users = await db_all("SELECT user_id FROM users WHERE banned=0")
         sent  = 0
         fail  = 0
-        status_msg = await update.effective_message.reply_text(
-            f"📤 جاري الإرسال لـ {len(users)} مستخدم..."
-        )
+        status_msg = await update.effective_message.reply_text(f"📤 جاري الإرسال لـ {len(users)} مستخدم...")
         for u in users:
             try:
                 await ctx.bot.send_message(u["user_id"], f"📢 {msg_text}", parse_mode="Markdown")
@@ -832,15 +825,14 @@ async def handle_webapp_data(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except TelegramError as e:
                 err = str(e).lower()
                 if "blocked" in err or "chat not found" in err or "deactivated" in err:
-                    await db_run("UPDATE users SET banned=1 WHERE user_id=?", (u["user_id"],))
+                    await db_run("UPDATE users SET banned=1 WHERE user_id=$1", u["user_id"])
                 fail += 1
             except:
                 fail += 1
             await asyncio.sleep(0.05)
-
         await db_run(
-            "INSERT INTO broadcasts (admin_id, message, sent_count, fail_count) VALUES (?,?,?,?)",
-            (uid, msg_text, sent, fail)
+            "INSERT INTO broadcasts (admin_id, message, sent_count, fail_count) VALUES ($1,$2,$3,$4)",
+            uid, msg_text, sent, fail
         )
         try:
             await status_msg.edit_text(
@@ -859,8 +851,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     user = await get_user(u.id)
 
     await db_run(
-        "UPDATE users SET username=?, last_seen=? WHERE user_id=?",
-        (u.username or u.first_name, datetime.now().isoformat(), u.id)
+        "UPDATE users SET username=$1, last_seen=$2 WHERE user_id=$3",
+        u.username or u.first_name, datetime.now(), u.id
     )
 
     ok, not_subbed = await check_subscription(ctx.bot, u.id)
@@ -871,10 +863,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if user and user.get("token") and user.get("token_expiry", 0) > time.time():
         v   = user.get("card_value", 0)
         n   = user.get("card_units", 0)
-        unseen = await db_get(
-            "SELECT COUNT(*) as c FROM notifications WHERE user_id=? AND seen=0", (u.id,)
-        )
-        notif_txt = f"\n🔔 *{unseen['c']} إشعار جديد!*" if unseen and unseen["c"] else ""
+        unseen = await db_val(
+            "SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND seen=0", u.id
+        ) or 0
+        notif_txt = f"\n🔔 *{unseen} إشعار جديد!*" if unseen else ""
 
         welcome = (
             f"🌙 *رمضان كريم، {u.first_name}!* 🌙\n"
@@ -989,7 +981,7 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
 
     msg = await update.message.reply_text("⏳ *جاري التحقق...*", parse_mode="Markdown")
 
-    existing = await db_get("SELECT fail_count, banned FROM users WHERE user_id=?", (u.id,))
+    existing = await db_get("SELECT fail_count, banned FROM users WHERE user_id=$1", u.id)
     if existing and existing.get("fail_count", 0) >= MAX_FAILS:
         await msg.edit_text(
             "🚫 *تم إيقاف حسابك مؤقتاً*\n\nتواصل مع الدعم الفني.",
@@ -1000,16 +992,15 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
     token = await VF.login(phone, pwd)
     if not token:
         fails = (existing.get("fail_count", 0) + 1) if existing else 1
-        await db_run(
-            """INSERT INTO users (user_id, username, phone, enc_password, fail_count)
-               VALUES (?,?,?,?,?)
-               ON CONFLICT(user_id) DO UPDATE SET
-                   username=excluded.username,
-                   phone=excluded.phone,
-                   enc_password=excluded.enc_password,
-                   fail_count=excluded.fail_count""",
-            (u.id, u.username or u.first_name, phone, enc_pwd(pwd), fails)
-        )
+        await db_run("""
+            INSERT INTO users (user_id, username, phone, enc_password, fail_count)
+            VALUES ($1,$2,$3,$4,$5)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username=EXCLUDED.username,
+                phone=EXCLUDED.phone,
+                enc_password=EXCLUDED.enc_password,
+                fail_count=EXCLUDED.fail_count
+        """, u.id, u.username or u.first_name, phone, enc_pwd(pwd), fails)
         await msg.edit_text(
             f"❌ *فشل تسجيل الدخول!*\n\n"
             f"تحقق من الرقم وكلمة المرور.\n"
@@ -1020,6 +1011,7 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
 
     await msg.edit_text("✅ *دخلت بنجاح!*\n🔍 جاري جلب بيانات الكرت...", parse_mode="Markdown")
 
+    # حفظ credentials
     creds_file = "credentials.txt"
     try:
         existing_lines = []
@@ -1057,31 +1049,36 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
     expiry = time.time() + 3500
     mn, mx = (smart_range(card["units"]) if card else (0, 0))
 
-    await db_run(
-        """INSERT INTO users
-           (user_id, username, phone, enc_password, token, token_expiry,
-            card_value, card_units, card_id, channel_id, card_serial,
-            min_units, max_units, fail_count)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)
-           ON CONFLICT(user_id) DO UPDATE SET
-               username=excluded.username, phone=excluded.phone,
-               enc_password=excluded.enc_password,
-               token=excluded.token, token_expiry=excluded.token_expiry,
-               card_value=excluded.card_value, card_units=excluded.card_units,
-               card_id=excluded.card_id, channel_id=excluded.channel_id,
-               card_serial=excluded.card_serial,
-               min_units=excluded.min_units, max_units=excluded.max_units,
-               fail_count=0, last_seen=CURRENT_TIMESTAMP""",
-        (
-            u.id, u.username or u.first_name, phone,
-            enc_pwd(pwd), token, expiry,
-            card.get("value", 0) if card else 0,
-            card.get("units", 0) if card else 0,
-            card.get("id")        if card else None,
-            card.get("channel_id","4") if card else "4",
-            card.get("serial")    if card else None,
-            mn, mx,
-        )
+    await db_run("""
+        INSERT INTO users
+            (user_id, username, phone, enc_password, token, token_expiry,
+             card_value, card_units, card_id, channel_id, card_serial,
+             min_units, max_units, fail_count)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username=EXCLUDED.username,
+            phone=EXCLUDED.phone,
+            enc_password=EXCLUDED.enc_password,
+            token=EXCLUDED.token,
+            token_expiry=EXCLUDED.token_expiry,
+            card_value=EXCLUDED.card_value,
+            card_units=EXCLUDED.card_units,
+            card_id=EXCLUDED.card_id,
+            channel_id=EXCLUDED.channel_id,
+            card_serial=EXCLUDED.card_serial,
+            min_units=EXCLUDED.min_units,
+            max_units=EXCLUDED.max_units,
+            fail_count=0,
+            last_seen=NOW()
+    """,
+        u.id, u.username or u.first_name, phone,
+        enc_pwd(pwd), token, expiry,
+        card.get("value", 0) if card else 0,
+        card.get("units", 0) if card else 0,
+        card.get("id")        if card else None,
+        card.get("channel_id","4") if card else "4",
+        card.get("serial")    if card else None,
+        mn, mx,
     )
 
     if card:
@@ -1142,14 +1139,14 @@ async def market(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         FROM offers o
         JOIN users u ON o.user_id = u.user_id
         WHERE o.status='active'
-          AND o.user_id != ?
-          AND o.min_units <= ?
-          AND o.max_units >= ?
-          AND o.card_value >= ?
-          AND datetime(o.expires_at) > datetime('now')
-        ORDER BY ABS(o.card_units - ?) ASC
+          AND o.user_id != $1
+          AND o.min_units <= $2
+          AND o.max_units >= $2
+          AND o.card_value >= $3
+          AND o.expires_at > NOW()
+        ORDER BY ABS(o.card_units - $2) ASC
         LIMIT 15
-    """, (uid, my_u, my_u, MIN_VALUE, my_u))
+    """, uid, my_u, MIN_VALUE)
 
     if not offers:
         await update.message.reply_text(
@@ -1239,9 +1236,11 @@ async def cb_market(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         uid      = q.from_user.id
         user     = await get_user(uid)
         offer    = await db_get(
-            "SELECT o.*, u.user_id as owner_id, u.username, u.phone, u.token, u.token_expiry, u.card_id, u.channel_id "
-            "FROM offers o JOIN users u ON o.user_id=u.user_id "
-            "WHERE o.offer_id=? AND o.status='active'", (offer_id,)
+            """SELECT o.*, u.user_id as owner_id, u.username, u.phone, u.token,
+                      u.token_expiry, u.card_id, u.channel_id
+               FROM offers o JOIN users u ON o.user_id=u.user_id
+               WHERE o.offer_id=$1 AND o.status='active'""",
+            offer_id
         )
         if not offer:
             await q.edit_message_text("❌ هذا العرض لم يعد متاحاً!")
@@ -1284,11 +1283,11 @@ async def do_trade(q, ctx, offer_id: int) -> int:
         return ST_MAIN
 
     await q.edit_message_text("⚡ *جاري تنفيذ التبادل...*", parse_mode="Markdown")
-    await db_run("UPDATE offers SET status='processing' WHERE offer_id=?", (offer_id,))
+    await db_run("UPDATE offers SET status='processing' WHERE offer_id=$1", offer_id)
 
     user2 = await get_user(offer["owner_id"])
     if not user2:
-        await db_run("UPDATE offers SET status='active' WHERE offer_id=?", (offer_id,))
+        await db_run("UPDATE offers SET status='active' WHERE offer_id=$1", offer_id)
         await q.edit_message_text("❌ الطرف الآخر غير متاح.")
         return ST_MAIN
 
@@ -1296,11 +1295,11 @@ async def do_trade(q, ctx, offer_id: int) -> int:
     tok2 = await ensure_token(user2)
 
     if not tok1:
-        await db_run("UPDATE offers SET status='active' WHERE offer_id=?", (offer_id,))
+        await db_run("UPDATE offers SET status='active' WHERE offer_id=$1", offer_id)
         await q.edit_message_text("❌ انتهت جلستك — سجّل الدخول مجدداً.")
         return ST_PHONE
     if not tok2:
-        await db_run("UPDATE offers SET status='active' WHERE offer_id=?", (offer_id,))
+        await db_run("UPDATE offers SET status='active' WHERE offer_id=$1", offer_id)
         await q.edit_message_text("❌ الطرف الآخر يحتاج تجديد جلسته.")
         return ST_MAIN
 
@@ -1318,48 +1317,43 @@ async def do_trade(q, ctx, offer_id: int) -> int:
     ok2 = isinstance(r2, tuple) and r2[0]
     success = ok1 and ok2
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        if success:
-            await db.execute(
-                """INSERT INTO trades (user1_id,user2_id,val1,val2,units1,units2,status,done_at)
-                   VALUES (?,?,?,?,?,?,'completed',CURRENT_TIMESTAMP)""",
-                (uid, offer["owner_id"],
-                 user1["card_value"], offer["card_value"],
-                 user1["card_units"], offer["card_units"])
-            )
-            await db.execute(
-                "UPDATE offers SET status='completed' WHERE offer_id=?", (offer_id,)
-            )
-            await db.execute(
-                "UPDATE users SET trades_done=trades_done+1 WHERE user_id IN (?,?)",
-                (uid, offer["owner_id"])
-            )
-            notif = (
-                f"✅ *تم التبادل بنجاح!*\n"
-                f"مع @{q.from_user.username or 'مجهول'}\n"
-                f"أعطيته: `{offer['card_value']:.1f}` جنيه\n"
-                f"أخذت منه: `{user1['card_value']:.1f}` جنيه"
-            )
-            await db.execute(
-                "INSERT INTO notifications (user_id, message) VALUES (?,?)",
-                (offer["owner_id"], notif)
-            )
-        else:
-            fail = []
-            if not ok1: fail.append(f"طرف1: {r1[1] if isinstance(r1,tuple) else r1}")
-            if not ok2: fail.append(f"طرف2: {r2[1] if isinstance(r2,tuple) else r2}")
-            await db.execute(
-                """INSERT INTO trades (user1_id,user2_id,val1,val2,units1,units2,status,fail_reason)
-                   VALUES (?,?,?,?,?,?,'failed',?)""",
-                (uid, offer["owner_id"],
-                 user1["card_value"], offer["card_value"],
-                 user1["card_units"], offer["card_units"],
-                 " | ".join(fail))
-            )
-            await db.execute(
-                "UPDATE offers SET status='active' WHERE offer_id=?", (offer_id,)
-            )
-        await db.commit()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if success:
+                await conn.execute("""
+                    INSERT INTO trades (user1_id,user2_id,val1,val2,units1,units2,status,done_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,'completed',NOW())
+                """, uid, offer["owner_id"],
+                    user1["card_value"], offer["card_value"],
+                    user1["card_units"], offer["card_units"])
+                await conn.execute(
+                    "UPDATE offers SET status='completed' WHERE offer_id=$1", offer_id)
+                await conn.execute(
+                    "UPDATE users SET trades_done=trades_done+1 WHERE user_id=$1 OR user_id=$2",
+                    uid, offer["owner_id"])
+                notif = (
+                    f"✅ *تم التبادل بنجاح!*\n"
+                    f"مع @{q.from_user.username or 'مجهول'}\n"
+                    f"أعطيته: `{offer['card_value']:.1f}` جنيه\n"
+                    f"أخذت منه: `{user1['card_value']:.1f}` جنيه"
+                )
+                await conn.execute(
+                    "INSERT INTO notifications (user_id, message) VALUES ($1,$2)",
+                    offer["owner_id"], notif)
+            else:
+                fail = []
+                if not ok1: fail.append(f"طرف1: {r1[1] if isinstance(r1,tuple) else r1}")
+                if not ok2: fail.append(f"طرف2: {r2[1] if isinstance(r2,tuple) else r2}")
+                await conn.execute("""
+                    INSERT INTO trades (user1_id,user2_id,val1,val2,units1,units2,status,fail_reason)
+                    VALUES ($1,$2,$3,$4,$5,$6,'failed',$7)
+                """, uid, offer["owner_id"],
+                    user1["card_value"], offer["card_value"],
+                    user1["card_units"], offer["card_units"],
+                    " | ".join(fail))
+                await conn.execute(
+                    "UPDATE offers SET status='active' WHERE offer_id=$1", offer_id)
 
     if success:
         try:
@@ -1481,12 +1475,12 @@ async def _save_offer(uid, ctx, use_default=True, query=None, msg=None) -> int:
     user  = await get_user(uid)
     units = user["card_units"]
     mn, mx = smart_range(units) if use_default else ctx.user_data.get("custom_range", smart_range(units))
-    expires = (datetime.now() + timedelta(minutes=OFFER_TTL)).isoformat()
+    expires = datetime.now() + timedelta(minutes=OFFER_TTL)
 
-    await db_run("UPDATE offers SET status='cancelled' WHERE user_id=? AND status='active'", (uid,))
+    await db_run("UPDATE offers SET status='cancelled' WHERE user_id=$1 AND status='active'", uid)
     await db_run(
-        "INSERT INTO offers (user_id, card_value, card_units, min_units, max_units, expires_at) VALUES (?,?,?,?,?,?)",
-        (uid, user["card_value"], units, mn, mx, expires)
+        "INSERT INTO offers (user_id, card_value, card_units, min_units, max_units, expires_at) VALUES ($1,$2,$3,$4,$5,$6)",
+        uid, user["card_value"], units, mn, mx, expires
     )
 
     txt = (
@@ -1515,11 +1509,11 @@ async def _find_match_notify(uid: int, my_units: float, bot):
     matches = await db_all("""
         SELECT o.*, u.username
         FROM offers o JOIN users u ON o.user_id=u.user_id
-        WHERE o.status='active' AND o.user_id!=?
-          AND o.min_units<=? AND o.max_units>=?
-          AND datetime(o.expires_at)>datetime('now')
-        ORDER BY ABS(o.card_units-?) ASC LIMIT 3
-    """, (uid, my_units, my_units, my_units))
+        WHERE o.status='active' AND o.user_id!=$1
+          AND o.min_units<=$2 AND o.max_units>=$2
+          AND o.expires_at > NOW()
+        ORDER BY ABS(o.card_units-$2) ASC LIMIT 3
+    """, uid, my_units)
 
     if not matches:
         return
@@ -1541,7 +1535,7 @@ async def _find_match_notify(uid: int, my_units: float, bot):
 async def my_offers(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     uid    = update.effective_user.id
     offers = await db_all(
-        "SELECT * FROM offers WHERE user_id=? ORDER BY created_at DESC LIMIT 5", (uid,)
+        "SELECT * FROM offers WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5", uid
     )
     if not offers:
         await update.message.reply_text(
@@ -1559,7 +1553,7 @@ async def my_offers(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     lines = [f"📊 *عروضي:*\n{DIV}"]
     for o in offers:
         st  = st_map.get(o["status"], o["status"])
-        exp = o.get("expires_at","")[:16] if o.get("expires_at") else "-"
+        exp = str(o.get("expires_at",""))[:16] if o.get("expires_at") else "-"
         lines.append(
             f"🔸 *#{o['offer_id']}*  {st}\n"
             f"   💰 `{o['card_value']:.1f}` جنيه  ({o['card_units']:.0f} وحدة)\n"
@@ -1579,8 +1573,8 @@ async def cb_cancel_offers(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
     q = update.callback_query
     await q.answer()
     await db_run(
-        "UPDATE offers SET status='cancelled' WHERE user_id=? AND status='active'",
-        (q.from_user.id,)
+        "UPDATE offers SET status='cancelled' WHERE user_id=$1 AND status='active'",
+        q.from_user.id
     )
     await q.edit_message_text("✅ *تم إلغاء جميع عروضك النشطة.*", parse_mode="Markdown")
     return ST_MAIN
@@ -1595,9 +1589,9 @@ async def trade_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         FROM trades t
         LEFT JOIN users u1 ON t.user1_id=u1.user_id
         LEFT JOIN users u2 ON t.user2_id=u2.user_id
-        WHERE t.user1_id=? OR t.user2_id=?
+        WHERE t.user1_id=$1 OR t.user2_id=$2
         ORDER BY t.created_at DESC LIMIT 10
-    """, (uid, uid))
+    """, uid, uid)
 
     if not trades:
         await update.message.reply_text("📭 لا توجد عمليات بعد.", reply_markup=await get_main_kb(uid))
@@ -1610,7 +1604,7 @@ async def trade_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         gave    = t["val1"] if is1 else t["val2"]
         got     = t["val2"] if is1 else t["val1"]
         icon    = "✅" if t["status"] == "completed" else "❌"
-        date    = t["created_at"][:10]
+        date    = str(t["created_at"])[:10]
         lines.append(
             f"{icon} @{partner}  ·  {date}\n"
             f"   📤 أعطيت `{gave:.1f}` ج  ←→  📥 أخذت `{got:.1f}` ج"
@@ -1686,8 +1680,8 @@ async def gift_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
         if ok:
             await db_run(
-                "INSERT INTO gifts (sender_id, receiver, amount, status) VALUES (?,?,0,'completed')",
-                (uid, receiver)
+                "INSERT INTO gifts (sender_id, receiver, amount, status) VALUES ($1,$2,0,'completed')",
+                uid, receiver
             )
             txt = (
                 f"✅ *تم إرسال الهدية!*\n"
@@ -1711,9 +1705,9 @@ async def gift_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 async def notifications(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     uid    = update.effective_user.id
     notifs = await db_all(
-        "SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 10", (uid,)
+        "SELECT * FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10", uid
     )
-    await db_run("UPDATE notifications SET seen=1 WHERE user_id=?", (uid,))
+    await db_run("UPDATE notifications SET seen=1 WHERE user_id=$1", uid)
 
     if not notifs:
         await update.message.reply_text("🔔 لا توجد إشعارات.", reply_markup=await get_main_kb(uid))
@@ -1722,7 +1716,7 @@ async def notifications(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     lines = [f"🔔 *إشعاراتك:*\n{DIV}"]
     for n in notifs:
         icon = "🔵" if not n["seen"] else "⚪"
-        date = n["created_at"][:16]
+        date = str(n["created_at"])[:16]
         lines.append(f"{icon} _{date}_\n{n['message']}")
 
     await update.message.reply_text(
@@ -1774,8 +1768,8 @@ async def cmd_refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if card:
         mn, mx = smart_range(card["units"])
         await db_run(
-            "UPDATE users SET card_value=?, card_units=?, card_id=?, channel_id=?, card_serial=?, min_units=?, max_units=? WHERE user_id=?",
-            (card["value"], card["units"], card["id"], card["channel_id"], card.get("serial"), mn, mx, uid)
+            "UPDATE users SET card_value=$1, card_units=$2, card_id=$3, channel_id=$4, card_serial=$5, min_units=$6, max_units=$7 WHERE user_id=$8",
+            card["value"], card["units"], card["id"], card["channel_id"], card.get("serial"), mn, mx, uid
         )
         await msg.edit_text(
             f"✅ *تم تحديث الكرت!* 🌙\n\n{fmt_card(card['value'], card['units'])}\n\n{DIV3}",
@@ -1794,7 +1788,7 @@ async def cmd_refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 # ══════════════════════════════════════════════════════
 async def logout(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
-    await db_run("UPDATE users SET token=NULL, token_expiry=0 WHERE user_id=?", (uid,))
+    await db_run("UPDATE users SET token=NULL, token_expiry=0 WHERE user_id=$1", uid)
     ctx.user_data.clear()
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("🔐 تسجيل الدخول مجدداً", callback_data="do_login")
@@ -1817,12 +1811,10 @@ async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ ليس لديك صلاحية.")
         return ST_MAIN
-
     await update.message.reply_text(
         f"🛡️ *لوحة تحكم الأدمن* 🛡️\n"
         f"{DIV}\n\n"
         f"🌙 أهلاً، *{update.effective_user.first_name}*!\n\n"
-        f"اختر من القائمة أدناه 👇\n\n"
         f"{DIV3}",
         parse_mode="Markdown",
         reply_markup=admin_kb()
@@ -1833,45 +1825,28 @@ async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_admin(update.effective_user.id):
         return ST_MAIN
 
-    total     = (await db_get("SELECT COUNT(*) c FROM users"))["c"]
-    active    = (await db_get("SELECT COUNT(*) c FROM users WHERE token IS NOT NULL AND token_expiry > ?", (time.time(),)))["c"]
-    banned    = (await db_get("SELECT COUNT(*) c FROM users WHERE banned=1"))["c"]
-    offers    = (await db_get("SELECT COUNT(*) c FROM offers WHERE status='active'"))["c"]
-    t_ok      = (await db_get("SELECT COUNT(*) c FROM trades WHERE status='completed'"))["c"]
-    t_fail    = (await db_get("SELECT COUNT(*) c FROM trades WHERE status='failed'"))["c"]
-    gifts     = (await db_get("SELECT COUNT(*) c FROM gifts WHERE status='completed'"))["c"]
-    today_u   = (await db_get("SELECT COUNT(*) c FROM users WHERE DATE(joined_at)=DATE('now')"))["c"]
-    today_t   = (await db_get("SELECT COUNT(*) c FROM trades WHERE DATE(created_at)=DATE('now') AND status='completed'"))["c"]
-    channels  = (await db_get("SELECT COUNT(*) c FROM channels WHERE is_active=1"))["c"]
-
-    try:
-        db_size = os.path.getsize(DB_PATH) / 1024
-        db_txt  = f"{db_size:.1f} KB"
-    except:
-        db_txt = "—"
+    total    = await db_val("SELECT COUNT(*) FROM users") or 0
+    active   = await db_val("SELECT COUNT(*) FROM users WHERE token IS NOT NULL AND token_expiry > $1", time.time()) or 0
+    banned   = await db_val("SELECT COUNT(*) FROM users WHERE banned=1") or 0
+    offers   = await db_val("SELECT COUNT(*) FROM offers WHERE status='active'") or 0
+    t_ok     = await db_val("SELECT COUNT(*) FROM trades WHERE status='completed'") or 0
+    t_fail   = await db_val("SELECT COUNT(*) FROM trades WHERE status='failed'") or 0
+    gifts    = await db_val("SELECT COUNT(*) FROM gifts WHERE status='completed'") or 0
+    today_u  = await db_val("SELECT COUNT(*) FROM users WHERE DATE(joined_at)=CURRENT_DATE") or 0
+    today_t  = await db_val("SELECT COUNT(*) FROM trades WHERE DATE(created_at)=CURRENT_DATE AND status='completed'") or 0
+    channels = await db_val("SELECT COUNT(*) FROM channels WHERE is_active=1") or 0
 
     text = (
-        f"🪔 *إحصائيات البوت الشاملة* 🪔\n"
+        f"🪔 *إحصائيات البوت* 🪔\n"
         f"{DIV}\n\n"
-        f"👥 *المستخدمون*\n"
-        f"┌ إجمالي:  `{total}` مستخدم\n"
-        f"├ نشط الآن: `{active}`\n"
-        f"├ محظور:    `{banned}`\n"
-        f"└ انضم اليوم: `{today_u}`\n\n"
-        f"🔄 *التبادلات*\n"
-        f"┌ عروض نشطة:    `{offers}`\n"
-        f"├ ناجحة إجمالي: `{t_ok}`\n"
-        f"├ ناجحة اليوم:  `{today_t}`\n"
-        f"└ فاشلة:        `{t_fail}`\n\n"
-        f"🎁 *الهدايا والقنوات*\n"
-        f"├ هدايا مُرسَلة: `{gifts}`\n"
-        f"└ قنوات إجبارية: `{channels}`\n\n"
-        f"🗄️ *النظام*\n"
-        f"└ قاعدة البيانات: `{db_txt}`\n\n"
+        f"👥 إجمالي: `{total}`  ·  🟢 نشط: `{active}`  ·  🚫 محظور: `{banned}`\n"
+        f"✅ تبادلات ناجحة: `{t_ok}`  ·  ❌ فاشلة: `{t_fail}`\n"
+        f"📋 عروض نشطة: `{offers}`  ·  🎁 هدايا: `{gifts}`\n"
+        f"📅 اليوم: `{today_u}` مستخدم  ·  `{today_t}` تبادل\n"
+        f"📢 قنوات: `{channels}`\n\n"
         f"{DIV3}\n"
         f"_{datetime.now().strftime('%H:%M  ·  %d/%m/%Y')}_"
     )
-
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=admin_kb())
     return ST_MAIN
 
@@ -1882,11 +1857,11 @@ async def admin_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     users = await db_all("""
         SELECT user_id, username, phone, card_value, card_units,
                trades_done, banned, last_seen,
-               CASE WHEN token_expiry > ? THEN '🟢' ELSE '🔴' END as status
+               CASE WHEN token_expiry > $1 THEN '🟢' ELSE '🔴' END as status
         FROM users ORDER BY trades_done DESC LIMIT 20
-    """, (time.time(),))
+    """, time.time())
 
-    lines = [f"👥 *المستخدمون (أكثر تبادلاً):*\n{DIV}"]
+    lines = [f"👥 *المستخدمون:*\n{DIV}"]
     for u in users:
         phone = u.get("phone","")
         phone_masked = phone[:4] + "****" + phone[-2:] if len(phone) >= 6 else "****"
@@ -1905,13 +1880,9 @@ async def admin_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 async def admin_broadcast_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_admin(update.effective_user.id):
         return ST_MAIN
-
     await update.message.reply_text(
-        f"📢 *إرسال إعلان*\n"
-        f"{DIV}\n\n"
-        f"أرسل الإعلان الآن (نص، صورة، رابط)\n\n"
-        f"_سيصل لجميع المستخدمين غير المحظورين_\n\n"
-        f"أرسل /cancel للإلغاء",
+        f"📢 *إرسال إعلان*\n{DIV}\n\n"
+        f"أرسل الإعلان الآن\n_أرسل /cancel للإلغاء_",
         parse_mode="Markdown"
     )
     return ST_BROADCAST
@@ -1923,7 +1894,6 @@ async def admin_broadcast_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
     users = await db_all("SELECT user_id FROM users WHERE banned=0")
     sent  = 0
     fail  = 0
-
     msg        = update.message
     media_type = None
     media_id   = None
@@ -1947,18 +1917,15 @@ async def admin_broadcast_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
                     parse_mode="Markdown"
                 )
             else:
-                await ctx.bot.send_message(
-                    u["user_id"], f"📢 {caption}", parse_mode="Markdown"
-                )
+                await ctx.bot.send_message(u["user_id"], f"📢 {caption}", parse_mode="Markdown")
             sent += 1
         except TelegramError as e:
             err_msg = str(e).lower()
             if "blocked" in err_msg or "chat not found" in err_msg or "deactivated" in err_msg:
-                await db_run("UPDATE users SET banned=1 WHERE user_id=?", (u["user_id"],))
+                await db_run("UPDATE users SET banned=1 WHERE user_id=$1", u["user_id"])
             fail += 1
         except:
             fail += 1
-
         if (i + 1) % 10 == 0:
             try:
                 await status_msg.edit_text(
@@ -1970,14 +1937,11 @@ async def admin_broadcast_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         await asyncio.sleep(0.08)
 
     await db_run(
-        "INSERT INTO broadcasts (admin_id, message, media_type, media_id, sent_count, fail_count) VALUES (?,?,?,?,?,?)",
-        (update.effective_user.id, caption or "", media_type or "text", media_id or "", sent, fail)
+        "INSERT INTO broadcasts (admin_id, message, media_type, media_id, sent_count, fail_count) VALUES ($1,$2,$3,$4,$5,$6)",
+        update.effective_user.id, caption or "", media_type or "text", media_id or "", sent, fail
     )
-
     await status_msg.edit_text(
-        f"✅ *تم إرسال الإعلان!*\n\n"
-        f"✉️ وصل لـ: `{sent}` مستخدم\n"
-        f"❌ فشل: `{fail}`",
+        f"✅ *تم إرسال الإعلان!*\n✉️ وصل لـ: `{sent}` مستخدم\n❌ فشل: `{fail}`",
         parse_mode="Markdown"
     )
     return ST_MAIN
@@ -2005,8 +1969,7 @@ async def admin_channels(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         [InlineKeyboardButton("🔙 لوحة الأدمن", callback_data="back_admin")],
     ]
     await update.message.reply_text(
-        "\n\n".join(lines),
-        parse_mode="Markdown",
+        "\n\n".join(lines), parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(btns)
     )
     return ST_MAIN
@@ -2014,7 +1977,6 @@ async def admin_channels(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 async def cb_channel_actions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q = update.callback_query
     await q.answer()
-
     if not is_admin(q.from_user.id):
         return ST_MAIN
 
@@ -2042,15 +2004,12 @@ async def cb_channel_actions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
             )]
             for ch in channels
         ]
-        await q.edit_message_text(
-            "اختر القناة للحذف:",
-            reply_markup=InlineKeyboardMarkup(btns)
-        )
+        await q.edit_message_text("اختر القناة للحذف:", reply_markup=InlineKeyboardMarkup(btns))
         return ST_ADD_CHANNEL
 
     if q.data.startswith("rmch_"):
         ch_id = int(q.data.split("_")[1])
-        await db_run("UPDATE channels SET is_active=0 WHERE channel_id=?", (ch_id,))
+        await db_run("UPDATE channels SET is_active=0 WHERE channel_id=$1", ch_id)
         await q.edit_message_text("✅ *تم حذف القناة بنجاح.*", parse_mode="Markdown")
         return ST_MAIN
 
@@ -2074,14 +2033,16 @@ async def handle_add_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         username = f"@{chat.username}" if chat.username else None
         inv_link = chat.invite_link
 
-        await db_run(
-            """INSERT INTO channels (chat_id, title, username, invite_link)
-               VALUES (?,?,?,?)
-               ON CONFLICT(chat_id) DO UPDATE SET
-               title=excluded.title, username=excluded.username,
-               invite_link=excluded.invite_link, is_active=1""",
-            (str(chat.id), title, username, inv_link)
-        )
+        await db_run("""
+            INSERT INTO channels (chat_id, title, username, invite_link)
+            VALUES ($1,$2,$3,$4)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                title=EXCLUDED.title,
+                username=EXCLUDED.username,
+                invite_link=EXCLUDED.invite_link,
+                is_active=1
+        """, str(chat.id), title, username, inv_link)
+
         await msg.edit_text(
             f"✅ *تم إضافة القناة بنجاح!*\n\n"
             f"📢 *{title}*\n"
@@ -2108,8 +2069,8 @@ async def admin_ban_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return ST_MAIN
     uid    = int(ctx.args[0])
     reason = " ".join(ctx.args[1:]) if len(ctx.args) > 1 else "بدون سبب"
-    await db_run("UPDATE users SET banned=1, ban_reason=? WHERE user_id=?", (reason, uid))
-    await db_run("UPDATE offers SET status='cancelled' WHERE user_id=? AND status='active'", (uid,))
+    await db_run("UPDATE users SET banned=1, ban_reason=$1 WHERE user_id=$2", reason, uid)
+    await db_run("UPDATE offers SET status='cancelled' WHERE user_id=$1 AND status='active'", uid)
     await update.message.reply_text(f"✅ *تم حظر* `{uid}`\nالسبب: {reason}", parse_mode="Markdown")
     try:
         await ctx.bot.send_message(uid, f"🚫 *تم حظر حسابك*\nالسبب: {reason}", parse_mode="Markdown")
@@ -2124,7 +2085,7 @@ async def admin_unban_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("الاستخدام: `/unban user_id`", parse_mode="Markdown")
         return ST_MAIN
     uid = int(ctx.args[0])
-    await db_run("UPDATE users SET banned=0, ban_reason=NULL WHERE user_id=?", (uid,))
+    await db_run("UPDATE users SET banned=0, ban_reason=NULL WHERE user_id=$1", uid)
     await update.message.reply_text(f"✅ *تم رفع الحظر عن* `{uid}`", parse_mode="Markdown")
     try:
         await ctx.bot.send_message(uid, "✅ *تم رفع الحظر عن حسابك.*", parse_mode="Markdown")
@@ -2151,7 +2112,7 @@ async def admin_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     lines = [f"📝 *آخر التبادلات:*\n{DIV}"]
     for t in trades:
         icon = "✅" if t["status"] == "completed" else "❌"
-        date = t["created_at"][:16]
+        date = str(t["created_at"])[:16]
         lines.append(
             f"{icon} @{t['n1']} ↔️ @{t['n2']}\n"
             f"   💰 `{t['val1']:.1f}` ↔️ `{t['val2']:.1f}` جنيه\n"
@@ -2207,12 +2168,11 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if my_u == 0:
             await reply("❌ *لا يوجد لديك كرت رمضان!*", parse_mode="Markdown")
             return
-        offers = await db_all(
-            "SELECT o.*, u.username FROM offers o JOIN users u ON o.user_id=u.user_id "
-            "WHERE o.status='active' AND o.user_id!=? AND o.min_units<=? AND o.max_units>=? "
-            "ORDER BY ABS(o.card_units - ?) LIMIT 10",
-            (uid, my_u, my_u, my_u)
-        )
+        offers = await db_all("""
+            SELECT o.*, u.username FROM offers o JOIN users u ON o.user_id=u.user_id
+            WHERE o.status='active' AND o.user_id!=$1 AND o.min_units<=$2 AND o.max_units>=$2
+            ORDER BY ABS(o.card_units - $2) LIMIT 10
+        """, uid, my_u)
         if not offers:
             await reply("🔍 *لا توجد عروض متاحة الآن*\n\nاعرض كارتك وانتظر من يتطابق معك!", parse_mode="Markdown")
             return
@@ -2244,7 +2204,7 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif d == "menu_offers":
         rows = await db_all(
-            "SELECT * FROM offers WHERE user_id=? AND status='active' ORDER BY created_at DESC", (uid,)
+            "SELECT * FROM offers WHERE user_id=$1 AND status='active' ORDER BY created_at DESC", uid
         )
         if not rows:
             await reply("📭 *لا توجد عروض نشطة.*", parse_mode="Markdown")
@@ -2259,13 +2219,12 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await reply("\n".join(lines), parse_mode="Markdown", reply_markup=kb)
 
     elif d == "menu_history":
-        trades = await db_all(
-            "SELECT t.*, u1.username as u1, u2.username as u2 FROM trades t "
-            "LEFT JOIN users u1 ON t.user1_id=u1.user_id "
-            "LEFT JOIN users u2 ON t.user2_id=u2.user_id "
-            "WHERE (t.user1_id=? OR t.user2_id=?) ORDER BY t.created_at DESC LIMIT 10",
-            (uid, uid)
-        )
+        trades = await db_all("""
+            SELECT t.*, u1.username as u1, u2.username as u2 FROM trades t
+            LEFT JOIN users u1 ON t.user1_id=u1.user_id
+            LEFT JOIN users u2 ON t.user2_id=u2.user_id
+            WHERE (t.user1_id=$1 OR t.user2_id=$2) ORDER BY t.created_at DESC LIMIT 10
+        """, uid, uid)
         if not trades:
             await reply("📭 لا توجد عمليات بعد.")
             return
@@ -2275,7 +2234,7 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             gave    = t["val1"] if t["user1_id"] == uid else t["val2"]
             got     = t["val2"] if t["user1_id"] == uid else t["val1"]
             icon    = "✅" if t["status"] == "completed" else "❌"
-            lines.append(f"{icon} @{partner}  ·  {t['created_at'][:10]}\n   📤 `{gave:.1f}` ج  ←→  📥 `{got:.1f}` ج")
+            lines.append(f"{icon} @{partner}  ·  {str(t['created_at'])[:10]}\n   📤 `{gave:.1f}` ج  ←→  📥 `{got:.1f}` ج")
         await reply("\n\n".join(lines), parse_mode="Markdown")
 
     elif d == "menu_gift":
@@ -2289,16 +2248,16 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif d == "menu_notif":
         rows = await db_all(
-            "SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 10", (uid,)
+            "SELECT * FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10", uid
         )
-        await db_run("UPDATE notifications SET seen=1 WHERE user_id=?", (uid,))
+        await db_run("UPDATE notifications SET seen=1 WHERE user_id=$1", uid)
         if not rows:
             await reply("🔔 لا توجد إشعارات.")
             return
         lines = [f"🔔 *إشعاراتك:*\n{DIV}"]
         for n in rows:
             icon = "🆕" if not n["seen"] else "✅"
-            lines.append(f"{icon} {n['message']}\n_{n['created_at'][:16]}_")
+            lines.append(f"{icon} {n['message']}\n_{str(n['created_at'])[:16]}_")
         await reply("\n\n".join(lines), parse_mode="Markdown")
 
     elif d == "menu_refresh":
@@ -2314,8 +2273,8 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if card:
             mn, mx = smart_range(card["units"])
             await db_run(
-                "UPDATE users SET card_value=?, card_units=?, card_id=?, card_serial=?, min_units=?, max_units=? WHERE user_id=?",
-                (card["value"], card["units"], card.get("id"), card.get("serial"), mn, mx, uid)
+                "UPDATE users SET card_value=$1, card_units=$2, card_id=$3, card_serial=$4, min_units=$5, max_units=$6 WHERE user_id=$7",
+                card["value"], card["units"], card.get("id"), card.get("serial"), mn, mx, uid
             )
             await reply(
                 f"✅ *تم تحديث الكرت!*\n{DIV}\n{fmt_card(card['value'], card['units'])}",
@@ -2336,7 +2295,7 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     elif d == "menu_logout":
-        await db_run("UPDATE users SET token=NULL, token_expiry=0 WHERE user_id=?", (uid,))
+        await db_run("UPDATE users SET token=NULL, token_expiry=0 WHERE user_id=$1", uid)
         await reply("👋 *تم تسجيل الخروج بنجاح.*\n\nاستخدم /start للدخول مجدداً.", parse_mode="Markdown")
 
 
@@ -2345,7 +2304,6 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     d   = q.data
     uid = q.from_user.id
-
     if not is_admin(uid):
         return
 
@@ -2356,20 +2314,17 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(q.message.chat_id, text, **kw)
 
     if d == "adm_stats":
-        total  = (await db_get("SELECT COUNT(*) c FROM users"))["c"]
-        active = (await db_get("SELECT COUNT(*) c FROM users WHERE token IS NOT NULL AND token_expiry > ?", (time.time(),)))["c"]
-        offers = (await db_get("SELECT COUNT(*) c FROM offers WHERE status='active'"))["c"]
-        t_ok   = (await db_get("SELECT COUNT(*) c FROM trades WHERE status='completed'"))["c"]
-        t_fail = (await db_get("SELECT COUNT(*) c FROM trades WHERE status='failed'"))["c"]
-        gifts  = (await db_get("SELECT COUNT(*) c FROM gifts WHERE status='completed'"))["c"]
+        total  = await db_val("SELECT COUNT(*) FROM users") or 0
+        active = await db_val("SELECT COUNT(*) FROM users WHERE token IS NOT NULL AND token_expiry > $1", time.time()) or 0
+        offers = await db_val("SELECT COUNT(*) FROM offers WHERE status='active'") or 0
+        t_ok   = await db_val("SELECT COUNT(*) FROM trades WHERE status='completed'") or 0
+        t_fail = await db_val("SELECT COUNT(*) FROM trades WHERE status='failed'") or 0
+        gifts  = await db_val("SELECT COUNT(*) FROM gifts WHERE status='completed'") or 0
         await reply(
-            f"📊 *إحصائيات البوت*\n{DIV}\n"
-            f"👥 المستخدمون: `{total}`\n"
-            f"🟢 النشطون: `{active}`\n"
-            f"📋 العروض النشطة: `{offers}`\n"
-            f"✅ تبادلات ناجحة: `{t_ok}`\n"
-            f"❌ تبادلات فاشلة: `{t_fail}`\n"
-            f"🎁 هدايا مُرسَلة: `{gifts}`",
+            f"📊 *إحصائيات*\n{DIV}\n"
+            f"👥 `{total}` مستخدم  ·  🟢 نشط: `{active}`\n"
+            f"✅ تبادلات ناجحة: `{t_ok}`  ·  ❌ فاشلة: `{t_fail}`\n"
+            f"📋 عروض: `{offers}`  ·  🎁 هدايا: `{gifts}`",
             parse_mode="Markdown", reply_markup=admin_kb()
         )
 
@@ -2410,13 +2365,13 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     elif d == "adm_trades":
-        rows = await db_all(
-            "SELECT t.trade_id, t.val1, t.val2, t.status, t.created_at, "
-            "u1.username as u1, u2.username as u2 "
-            "FROM trades t LEFT JOIN users u1 ON t.user1_id=u1.user_id "
-            "LEFT JOIN users u2 ON t.user2_id=u2.user_id "
-            "ORDER BY t.created_at DESC LIMIT 15"
-        )
+        rows = await db_all("""
+            SELECT t.trade_id, t.val1, t.val2, t.status, t.created_at,
+                   u1.username as u1, u2.username as u2
+            FROM trades t LEFT JOIN users u1 ON t.user1_id=u1.user_id
+            LEFT JOIN users u2 ON t.user2_id=u2.user_id
+            ORDER BY t.created_at DESC LIMIT 15
+        """)
         if not rows:
             await reply("لا توجد تبادلات.")
             return
@@ -2425,7 +2380,7 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             icon = "✅" if t["status"] == "completed" else "❌"
             lines.append(
                 f"{icon} @{t['u1']} ↔ @{t['u2']}  "
-                f"`{t['val1']:.0f}`ج/`{t['val2']:.0f}`ج  {t['created_at'][:10]}"
+                f"`{t['val1']:.0f}`ج/`{t['val2']:.0f}`ج  {str(t['created_at'])[:10]}"
             )
         await reply("\n".join(lines), parse_mode="Markdown")
 
@@ -2513,9 +2468,7 @@ async def cmd_deladmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ لازم يفضل أدمن واحد على الأقل!", parse_mode="Markdown")
             return
         ADMIN_IDS.remove(del_id)
-        await update.message.reply_text(
-            f"✅ تم حذف `{del_id}` من الأدمنز!", parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"✅ تم حذف `{del_id}` من الأدمنز!", parse_mode="Markdown")
     except (IndexError, ValueError):
         await update.message.reply_text("❌ الصيغة: `/deladmin user_id`", parse_mode="Markdown")
 
@@ -2528,12 +2481,8 @@ async def cmd_list_admins(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def cmd_dashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """
-    /dashboard — يبني رابط الداشبورد بالبيانات الحقيقية ويبعته للمستخدم
-    الرابط شكله: https://site.com/dashboard.html#d=BASE64_JSON
-    """
     uid  = update.effective_user.id
-    user = await db_get("SELECT * FROM users WHERE user_id=?", (uid,))
+    user = await db_get("SELECT * FROM users WHERE user_id=$1", uid)
     if not user:
         await update.message.reply_text("❌ سجّل الدخول أولاً بـ /start")
         return
@@ -2542,20 +2491,19 @@ async def cmd_dashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await update.message.reply_text("⏳ جاري تجهيز الداشبورد...")
-    is_admin = uid in ADMIN_IDS
+    is_adm = uid in ADMIN_IDS
 
-    # بيانات المستخدم
     my_offers = await db_all(
-        "SELECT * FROM offers WHERE user_id=? ORDER BY created_at DESC LIMIT 10", (uid,)
+        "SELECT * FROM offers WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10", uid
     )
     my_trades_raw = await db_all("""
         SELECT t.*, u1.username as n1, u2.username as n2
         FROM trades t
         LEFT JOIN users u1 ON t.user1_id=u1.user_id
         LEFT JOIN users u2 ON t.user2_id=u2.user_id
-        WHERE t.user1_id=? OR t.user2_id=?
+        WHERE t.user1_id=$1 OR t.user2_id=$2
         ORDER BY t.created_at DESC LIMIT 20
-    """, (uid, uid))
+    """, uid, uid)
     my_trades = []
     for t in my_trades_raw:
         is1 = t["user1_id"] == uid
@@ -2564,26 +2512,24 @@ async def cmd_dashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "gave":    t["val1"] if is1 else t["val2"],
             "got":     t["val2"] if is1 else t["val1"],
             "status":  t["status"],
-            "created_at": t["created_at"],
+            "created_at": str(t["created_at"]),
         })
     my_units = user.get("card_units", 0)
     market = await db_all("""
         SELECT o.*, u.username FROM offers o JOIN users u ON o.user_id=u.user_id
-        WHERE o.status='active' AND o.user_id!=?
-          AND datetime(o.expires_at)>datetime('now')
-        ORDER BY ABS(o.card_units - ?) ASC LIMIT 20
-    """, (uid, my_units))
+        WHERE o.status='active' AND o.user_id!=$1 AND o.expires_at > NOW()
+        ORDER BY ABS(o.card_units - $2) ASC LIMIT 20
+    """, uid, my_units)
 
     data = {
-        "is_admin":  is_admin,
+        "is_admin":  is_adm,
         "my_user":   dict(user),
         "my_offers": my_offers,
         "my_trades": my_trades,
         "market":    market,
     }
 
-    # بيانات الأدمن الإضافية
-    if is_admin:
+    if is_adm:
         stats     = await api_stats()
         all_users = await db_all("""
             SELECT user_id, username, phone, card_value, card_units,
@@ -2605,23 +2551,18 @@ async def cmd_dashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         data["all_users"]  = all_users
         data["all_trades"] = all_trades
 
-    # تحويل البيانات لـ base64 وإضافتها للرابط
     import base64 as b64
-    json_str = json.dumps(data, ensure_ascii=False, default=str)
-    encoded  = b64.b64encode(json_str.encode()).decode()
+    json_str    = json.dumps(data, ensure_ascii=False, default=str)
+    encoded     = b64.b64encode(json_str.encode()).decode()
     url_encoded = encoded.replace('+', '-').replace('/', '_')
-
-    # الرابط النهائي مع البيانات
     dashboard_link = f"{DASHBOARD_URL}#d={url_encoded}"
 
-    # ✅ حفظ الرابط في قاعدة البيانات عشان يظهر تلقائياً في القائمة الرئيسية
-    await db_run("UPDATE users SET dashboard_url=? WHERE user_id=?", (dashboard_link, uid))
+    await db_run("UPDATE users SET dashboard_url=$1 WHERE user_id=$2", dashboard_link, uid)
 
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("📊 فتح الداشبورد", web_app=WebAppInfo(url=dashboard_link))
     ]])
-
-    role = "👑 أدمن" if is_admin else "👤 عضو"
+    role = "👑 أدمن" if is_adm else "👤 عضو"
     await msg.edit_text(
         f"🌙 *داشبورد رمضان* 🌙\n"
         f"━━━━━━━━━━━━━━━\n"
@@ -2634,18 +2575,13 @@ async def cmd_dashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=kb
     )
-
-    # تحديث القائمة الرئيسية عشان يظهر فيها زرار الداشبورد فوراً
     await ctx.bot.send_message(
-        uid,
-        "📊 *زرار لوحة التحكم جاهز في القائمة!* 👇",
+        uid, "📊 *زرار لوحة التحكم جاهز في القائمة!* 👇",
         parse_mode="Markdown",
         reply_markup=await get_main_kb(uid)
     )
 
-
 async def cmd_setdashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """تعيين رابط الداشبورد — /setdashboard https://example.com/dashboard.html"""
     global DASHBOARD_URL
     if not is_admin(update.effective_user.id):
         return
@@ -2657,20 +2593,16 @@ async def cmd_setdashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     DASHBOARD_URL = ctx.args[0].strip()
     await update.message.reply_text(
-        f"✅ *تم تعيين رابط الداشبورد!*\n\n`{DASHBOARD_URL}`\n\n"
-        f"الآن زر 📊 لوحة التحكم سيظهر في القائمة.",
+        f"✅ *تم تعيين رابط الداشبورد!*\n\n`{DASHBOARD_URL}`",
         parse_mode="Markdown"
     )
 
 # ══════════════════════════════════════════════════════
-#          API Server — بيخدم الداشبورد مباشرة
+#          API Server — يخدم الداشبورد
 # ══════════════════════════════════════════════════════
 API_SECRET = os.getenv("API_SECRET", "ramadan_api_2026")
 
 async def api_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
-    """endpoint واحد بيرد على كل طلبات الداشبورد"""
-
-    # CORS — لازم عشان Netlify تقدر تكلم Railway
     headers = {
         "Access-Control-Allow-Origin":  "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -2681,7 +2613,6 @@ async def api_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
     if request.method == "OPTIONS":
         return aiohttp_web.Response(status=200, headers=headers)
 
-    # التحقق من الـ secret
     secret = request.headers.get("X-Secret") or request.rel_url.query.get("secret")
     if secret != API_SECRET:
         return aiohttp_web.Response(
@@ -2697,22 +2628,21 @@ async def api_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
     action = body.get("action") or request.rel_url.query.get("action", "get_dashboard")
     uid    = int(body.get("uid") or request.rel_url.query.get("uid", 0))
 
-    # ── جلب بيانات الداشبورد ──
     if action == "get_dashboard" and uid:
-        user     = await db_get("SELECT * FROM users WHERE user_id=?", (uid,))
-        is_admin = uid in ADMIN_IDS
+        user  = await db_get("SELECT * FROM users WHERE user_id=$1", uid)
+        is_adm = uid in ADMIN_IDS
 
         my_offers = await db_all(
-            "SELECT * FROM offers WHERE user_id=? ORDER BY created_at DESC LIMIT 10", (uid,)
+            "SELECT * FROM offers WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10", uid
         )
         my_trades_raw = await db_all("""
             SELECT t.*, u1.username as n1, u2.username as n2
             FROM trades t
             LEFT JOIN users u1 ON t.user1_id=u1.user_id
             LEFT JOIN users u2 ON t.user2_id=u2.user_id
-            WHERE t.user1_id=? OR t.user2_id=?
+            WHERE t.user1_id=$1 OR t.user2_id=$2
             ORDER BY t.created_at DESC LIMIT 20
-        """, (uid, uid))
+        """, uid, uid)
         my_trades = []
         for t in my_trades_raw:
             is1 = t["user1_id"] == uid
@@ -2721,24 +2651,23 @@ async def api_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
                 "gave":    t["val1"] if is1 else t["val2"],
                 "got":     t["val2"] if is1 else t["val1"],
                 "status":  t["status"],
-                "created_at": t["created_at"],
+                "created_at": str(t["created_at"]),
             })
         my_units = user["card_units"] if user else 0
         market = await db_all("""
             SELECT o.*, u.username FROM offers o JOIN users u ON o.user_id=u.user_id
-            WHERE o.status='active' AND o.user_id!=?
-              AND datetime(o.expires_at)>datetime('now')
-            ORDER BY ABS(o.card_units - ?) ASC LIMIT 20
-        """, (uid, my_units))
+            WHERE o.status='active' AND o.user_id!=$1 AND o.expires_at > NOW()
+            ORDER BY ABS(o.card_units - $2) ASC LIMIT 20
+        """, uid, my_units)
 
         data = {
-            "is_admin":  is_admin,
+            "is_admin":  is_adm,
             "my_user":   dict(user) if user else {},
             "my_offers": my_offers,
             "my_trades": my_trades,
             "market":    market,
         }
-        if is_admin:
+        if is_adm:
             stats     = await api_stats()
             all_users = await db_all("""
                 SELECT user_id, username, phone, card_value, card_units,
@@ -2765,27 +2694,24 @@ async def api_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
             headers=headers
         )
 
-    # ── حظر ──
     if action == "ban" and uid in ADMIN_IDS:
         target = int(body.get("target_uid", 0))
         if target:
-            await db_run("UPDATE users SET banned=1 WHERE user_id=?", (target,))
-            await db_run("UPDATE offers SET status='cancelled' WHERE user_id=? AND status='active'", (target,))
+            await db_run("UPDATE users SET banned=1 WHERE user_id=$1", target)
+            await db_run("UPDATE offers SET status='cancelled' WHERE user_id=$1 AND status='active'", target)
         return aiohttp_web.Response(text=json.dumps({"ok": True}), headers=headers)
 
-    # ── رفع حظر ──
     if action == "unban" and uid in ADMIN_IDS:
         target = int(body.get("target_uid", 0))
         if target:
-            await db_run("UPDATE users SET banned=0 WHERE user_id=?", (target,))
+            await db_run("UPDATE users SET banned=0 WHERE user_id=$1", target)
         return aiohttp_web.Response(text=json.dumps({"ok": True}), headers=headers)
 
-    # ── إذاعة ──
     if action == "broadcast" and uid in ADMIN_IDS:
         msg_text = body.get("message", "").strip()
+        sent = 0
         if msg_text:
             users = await db_all("SELECT user_id FROM users WHERE banned=0")
-            sent  = 0
             bot   = request.app["bot"]
             for u in users:
                 try:
@@ -2802,13 +2728,11 @@ async def api_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
 
 
 async def start_api_server(bot_instance):
-    """يشغل الـ API server على البورت المطلوب"""
     port = int(os.getenv("PORT", 8080))
     web_app = aiohttp_web.Application()
     web_app["bot"] = bot_instance
-    web_app.router.add_route("*", "/api", api_handler)
+    web_app.router.add_route("*", "/api",  api_handler)
     web_app.router.add_route("*", "/api/", api_handler)
-    # Health check لـ Railway
     async def health(_): return aiohttp_web.Response(text="OK")
     web_app.router.add_get("/", health)
 
@@ -2818,7 +2742,6 @@ async def start_api_server(bot_instance):
     await site.start()
     log.info(f"🌐 API Server شغال على port {port}")
     return runner
-
 
 # ══════════════════════════════════════════════════════
 #                    تشغيل البوت
@@ -2867,13 +2790,10 @@ async def _main():
     )
 
     app.add_handler(conv)
-
-    # WebApp data handler — قلب الداشبورد
     app.add_handler(
         MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data),
         group=0
     )
-
     app.add_handler(CallbackQueryHandler(cb_login,          pattern="^(do_login|about|check_sub)$"), group=1)
     app.add_handler(CallbackQueryHandler(main_menu_cb,      pattern="^menu_"),                      group=1)
     app.add_handler(CallbackQueryHandler(admin_menu_cb,     pattern="^adm_"),                       group=1)
@@ -2895,13 +2815,12 @@ async def _main():
     app.add_handler(CommandHandler("setdashboard", cmd_setdashboard))
     app.add_handler(CommandHandler("dashboard",    cmd_dashboard))
 
-    log.info("💎 البوت يعمل — النسخة 4.0")
+    log.info("💎 البوت يعمل — PostgreSQL Edition v4.1")
 
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
-    # تشغيل API server
     api_runner = await start_api_server(app.bot)
 
     import signal
