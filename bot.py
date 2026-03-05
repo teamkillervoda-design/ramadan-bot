@@ -536,10 +536,10 @@ class VF:
                         return False, f"GET فشل HTTP {r.status}: {text[:150]}"
                     data = await r.json(content_type=None)
 
-            if not isinstance(data, list) or len(data) < 2:
+            if not isinstance(data, list) or len(data) < 1:
                 return False, "لا يوجد كرت رمضان متاح"
 
-            item      = data[1]
+            item      = data[0]
             fresh_id  = item.get("id") or card_id
             fresh_ch  = (item.get("channel") or {}).get("id") or channel_id or "4"
 
