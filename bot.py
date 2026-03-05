@@ -945,6 +945,7 @@ async def cb_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         f"_مثال: `01012345678`_",
         parse_mode="Markdown"
     )
+    ctx.user_data["state"] = "phone"
     return ST_PHONE
 
 async def handle_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
