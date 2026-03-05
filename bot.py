@@ -1120,30 +1120,35 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
     )
 
     if card:
-        await msg.edit_text(
+        txt = (
             f"🌙 *تم تسجيل الدخول بنجاح!*\n"
             f"{DIV}\n"
             f"📱 `{phone}`\n\n"
             f"{fmt_card(card['value'], card['units'])}\n\n"
             f"📊 نطاق التبادل المقترح:\n"
             f"   من `{mn:.0f}` إلى `{mx:.0f}` وحدة\n\n"
-            f"{DIV3}",
-            parse_mode="Markdown"
+            f"{DIV3}"
         )
     else:
-        await msg.edit_text(
+        txt = (
             "✅ *تم تسجيل الدخول بنجاح!*\n\n"
             "⚠️ لا يوجد كرت رمضان متاح على هذا الرقم.\n"
-            "_يمكنك استخدام البوت بعد شحن الكرت._",
-            parse_mode="Markdown"
+            "_يمكنك استخدام البوت بعد شحن الكرت._"
         )
 
-    await update.message.reply_text("اختر من القائمة 👇", reply_markup=await get_main_kb(u.id))
+    try:
+        await msg.edit_text(txt, parse_mode="Markdown")
+    except Exception as e:
+        log.error(f"edit_text error: {e}")
+        await ctx.bot.send_message(chat_id=u.id, text=txt, parse_mode="Markdown")
+
+    kb = await get_main_kb(u.id)
+    try:
+        await update.message.reply_text("اختر من القائمة 👇", reply_markup=kb)
+    except Exception:
+        await ctx.bot.send_message(chat_id=u.id, text="اختر من القائمة 👇", reply_markup=kb)
     ctx.user_data["state"] = "main"
     return ST_MAIN
-
-# ══════════════════════════════════════════════════════
-#                   سوق التبادل
 # ══════════════════════════════════════════════════════
 async def market(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     uid  = update.effective_user.id
