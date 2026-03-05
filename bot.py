@@ -314,9 +314,9 @@ class VF:
         "clientId":                "AnaVodafoneAndroid",
         "Accept-Language":         "ar",
         "x-agent-device":          "Xiaomi 21061119AG",
-        "x-agent-version":         "2025.11.1",
+        "x-agent-version":         "2025.10.3",
         "x-agent-build":           "1050",
-        "digitalId":               "28RI9U7IINOOB",
+        "digitalId":               "28RI9U7ISU8SW",
         "device-id":               "1df4efae59648ac3",
     }
 
@@ -496,45 +496,68 @@ class VF:
     async def send_gift(cls, phone: str, token: str,
                         receiver: str, card_id, channel_id,
                         card_serial: str = None) -> tuple[bool, str]:
-        url = f"{cls.WEB}/services/dxl/ramadanpromo/promotion"
+        # نفس الـ headers اللي بيستخدمها السكريبت الشغال
         headers = {
-            "Accept":             "application/json",
-            "Accept-Language":    "AR",
-            "Authorization":      f"Bearer {token}",
-            "Connection":         "keep-alive",
-            "Content-Type":       "application/json",
-            "Origin":             "https://web.vodafone.com.eg",
-            "Referer":            "https://web.vodafone.com.eg/portal/bf/rechargePromo",
-            "Sec-Fetch-Dest":     "empty",
-            "Sec-Fetch-Mode":     "cors",
-            "Sec-Fetch-Site":     "same-origin",
-            "User-Agent":         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-            "channel":            "WEB",
-            "clientId":           "WebsiteConsumer",
-            "msisdn":             phone,
-            "sec-ch-ua":          '"Chromium";v="137", "Not/A)Brand";v="24"',
-            "sec-ch-ua-mobile":   "?0",
-            "sec-ch-ua-platform": '"Linux"',
-            "x-dtpc":             "5$90742432_744h16vULSALMHSJUBASANRLVBBFCDPKOHDGNWO-0e0",
+            "User-Agent":        "vodafoneandroid",
+            "Accept":            "application/json",
+            "Accept-Encoding":   "gzip, deflate, br, zstd",
+            "sec-ch-ua-platform": '"Android"',
+            "Authorization":     f"Bearer {token}",
+            "Accept-Language":   "AR",
+            "msisdn":            phone,
+            "x-dtpc":            "8$7781247_562h50vPHEBDRMPUAFUMABJNUMWMBLCNOCMGLGU-0e0",
+            "clientId":          "WebsiteConsumer",
+            "sec-ch-ua":         '"Not:A-Brand";v="99", "Android WebView";v="145", "Chromium";v="145"',
+            "sec-ch-ua-mobile":  "?1",
+            "channel":           "APP_PORTAL",
+            "Content-Type":      "application/json",
+            "X-Requested-With":  "com.emeint.android.myservices",
+            "Sec-Fetch-Site":    "same-origin",
+            "Sec-Fetch-Mode":    "cors",
+            "Sec-Fetch-Dest":    "empty",
+            "Referer":           "https://web.vodafone.com.eg/portal/bf/massNearByPromo26",
         }
-        payload = {
-            "@type":   "Promo",
-            "channel": {"id": "4"},
-            "context": {"type": "RamdanCardDedication"},
-            "pattern": [{
-                "characteristics": [
-                    {"name": "BMsisdn", "value": receiver},
-                ]
-            }]
-        }
+        url = f"{cls.WEB}/services/dxl/promo/promotion"
         try:
+            # الخطوة 1: GET لجلب card_id و channel_id الحالي
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url,
+                                 params={"@type": "Promo", "$.context.type": "nearbyRamadan26"},
+                                 headers=headers,
+                                 timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    text = await r.text()
+                    log.info(f"send_gift GET {r.status}: {text[:300]}")
+                    if r.status != 200:
+                        return False, f"GET فشل HTTP {r.status}: {text[:150]}"
+                    data = await r.json(content_type=None)
+
+            if not isinstance(data, list) or len(data) < 2:
+                return False, "لا يوجد كرت رمضان متاح"
+
+            item      = data[1]
+            fresh_id  = item.get("id") or card_id
+            fresh_ch  = (item.get("channel") or {}).get("id") or channel_id or "4"
+
+            # الخطوة 2: POST لإرسال الهدية بنفس الـ headers
+            payload = {
+                "@type":   "Promo",
+                "channel": {"id": fresh_ch},
+                "context": {"type": "nearbyRamadan26"},
+                "pattern": [{
+                    "id": fresh_id,
+                    "characteristics": [
+                        {"name": "redemptionFlag", "value": "0"},
+                        {"name": "BMsisdn",        "value": receiver},
+                    ]
+                }]
+            }
             async with aiohttp.ClientSession() as s:
                 async with s.post(url,
-                                  json=payload,
+                                  data=json.dumps(payload),
                                   headers=headers,
                                   timeout=aiohttp.ClientTimeout(total=20)) as r:
                     text = await r.text()
-                    log.info(f"send_gift {r.status}: {text[:300]}")
+                    log.info(f"send_gift POST {r.status}: {text[:300]}")
                     if r.status == 200:
                         return True, ""
                     return False, f"HTTP {r.status}: {text[:200]}"
@@ -2940,4 +2963,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
