@@ -1087,37 +1087,40 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
     expiry = time.time() + 3500
     mn, mx = (smart_range(card["units"]) if card else (0, 0))
 
-    await db_run("""
-        INSERT INTO users
-            (user_id, username, phone, enc_password, token, token_expiry,
-             card_value, card_units, card_id, channel_id, card_serial,
-             min_units, max_units, fail_count)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0)
-        ON CONFLICT(user_id) DO UPDATE SET
-            username=EXCLUDED.username,
-            phone=EXCLUDED.phone,
-            enc_password=EXCLUDED.enc_password,
-            token=EXCLUDED.token,
-            token_expiry=EXCLUDED.token_expiry,
-            card_value=EXCLUDED.card_value,
-            card_units=EXCLUDED.card_units,
-            card_id=EXCLUDED.card_id,
-            channel_id=EXCLUDED.channel_id,
-            card_serial=EXCLUDED.card_serial,
-            min_units=EXCLUDED.min_units,
-            max_units=EXCLUDED.max_units,
-            fail_count=0,
-            last_seen=NOW()
-    """,
-        u.id, u.username or u.first_name, phone,
-        enc_pwd(pwd), token, expiry,
-        card.get("value", 0) if card else 0,
-        card.get("units", 0) if card else 0,
-        card.get("id")        if card else None,
-        card.get("channel_id","4") if card else "4",
-        card.get("serial")    if card else None,
-        mn, mx,
-    )
+    try:
+        await db_run("""
+            INSERT INTO users
+                (user_id, username, phone, enc_password, token, token_expiry,
+                 card_value, card_units, card_id, channel_id, card_serial,
+                 min_units, max_units, fail_count)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username=EXCLUDED.username,
+                phone=EXCLUDED.phone,
+                enc_password=EXCLUDED.enc_password,
+                token=EXCLUDED.token,
+                token_expiry=EXCLUDED.token_expiry,
+                card_value=EXCLUDED.card_value,
+                card_units=EXCLUDED.card_units,
+                card_id=EXCLUDED.card_id,
+                channel_id=EXCLUDED.channel_id,
+                card_serial=EXCLUDED.card_serial,
+                min_units=EXCLUDED.min_units,
+                max_units=EXCLUDED.max_units,
+                fail_count=0,
+                last_seen=NOW()
+        """,
+            u.id, u.username or u.first_name, phone,
+            enc_pwd(pwd), token, expiry,
+            card.get("value", 0) if card else 0,
+            card.get("units", 0) if card else 0,
+            card.get("id")        if card else None,
+            card.get("channel_id","4") if card else "4",
+            card.get("serial")    if card else None,
+            mn, mx,
+        )
+    except Exception as e:
+        log.error(f"db_run users upsert error: {e}")
 
     if card:
         txt = (
