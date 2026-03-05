@@ -2662,6 +2662,164 @@ async def cmd_setdashboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 # ══════════════════════════════════════════════════════
+#          API Server — بيخدم الداشبورد مباشرة
+# ══════════════════════════════════════════════════════
+API_SECRET = os.getenv("API_SECRET", "ramadan_api_2026")
+
+async def api_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """endpoint واحد بيرد على كل طلبات الداشبورد"""
+
+    # CORS — لازم عشان Netlify تقدر تكلم Railway
+    headers = {
+        "Access-Control-Allow-Origin":  "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, X-Secret",
+        "Content-Type": "application/json",
+    }
+
+    if request.method == "OPTIONS":
+        return aiohttp.web.Response(status=200, headers=headers)
+
+    # التحقق من الـ secret
+    secret = request.headers.get("X-Secret") or request.rel_url.query.get("secret")
+    if secret != API_SECRET:
+        return aiohttp.web.Response(
+            text=json.dumps({"error": "unauthorized"}),
+            status=401, headers=headers
+        )
+
+    try:
+        body = await request.json()
+    except:
+        body = {}
+
+    action = body.get("action") or request.rel_url.query.get("action", "get_dashboard")
+    uid    = int(body.get("uid") or request.rel_url.query.get("uid", 0))
+
+    # ── جلب بيانات الداشبورد ──
+    if action == "get_dashboard" and uid:
+        user     = await db_get("SELECT * FROM users WHERE user_id=?", (uid,))
+        is_admin = uid in ADMIN_IDS
+
+        my_offers = await db_all(
+            "SELECT * FROM offers WHERE user_id=? ORDER BY created_at DESC LIMIT 10", (uid,)
+        )
+        my_trades_raw = await db_all("""
+            SELECT t.*, u1.username as n1, u2.username as n2
+            FROM trades t
+            LEFT JOIN users u1 ON t.user1_id=u1.user_id
+            LEFT JOIN users u2 ON t.user2_id=u2.user_id
+            WHERE t.user1_id=? OR t.user2_id=?
+            ORDER BY t.created_at DESC LIMIT 20
+        """, (uid, uid))
+        my_trades = []
+        for t in my_trades_raw:
+            is1 = t["user1_id"] == uid
+            my_trades.append({
+                "partner": t["n2"] if is1 else t["n1"],
+                "gave":    t["val1"] if is1 else t["val2"],
+                "got":     t["val2"] if is1 else t["val1"],
+                "status":  t["status"],
+                "created_at": t["created_at"],
+            })
+        my_units = user["card_units"] if user else 0
+        market = await db_all("""
+            SELECT o.*, u.username FROM offers o JOIN users u ON o.user_id=u.user_id
+            WHERE o.status='active' AND o.user_id!=?
+              AND datetime(o.expires_at)>datetime('now')
+            ORDER BY ABS(o.card_units - ?) ASC LIMIT 20
+        """, (uid, my_units))
+
+        data = {
+            "is_admin":  is_admin,
+            "my_user":   dict(user) if user else {},
+            "my_offers": my_offers,
+            "my_trades": my_trades,
+            "market":    market,
+        }
+        if is_admin:
+            stats     = await api_stats()
+            all_users = await db_all("""
+                SELECT user_id, username, phone, card_value, card_units,
+                       trades_done, banned, last_seen
+                FROM users ORDER BY trades_done DESC LIMIT 100
+            """)
+            for u in all_users:
+                p = u.get("phone", "")
+                u["phone"] = p[:4] + "****" + p[-2:] if len(p) >= 6 else "****"
+            all_trades = await db_all("""
+                SELECT t.trade_id, t.val1, t.val2, t.status, t.created_at,
+                       u1.username as user1, u2.username as user2
+                FROM trades t
+                LEFT JOIN users u1 ON t.user1_id=u1.user_id
+                LEFT JOIN users u2 ON t.user2_id=u2.user_id
+                ORDER BY t.created_at DESC LIMIT 50
+            """)
+            data["stats"]      = stats
+            data["all_users"]  = all_users
+            data["all_trades"] = all_trades
+
+        return aiohttp.web.Response(
+            text=json.dumps(data, ensure_ascii=False, default=str),
+            headers=headers
+        )
+
+    # ── حظر ──
+    if action == "ban" and uid in ADMIN_IDS:
+        target = int(body.get("target_uid", 0))
+        if target:
+            await db_run("UPDATE users SET banned=1 WHERE user_id=?", (target,))
+            await db_run("UPDATE offers SET status='cancelled' WHERE user_id=? AND status='active'", (target,))
+        return aiohttp.web.Response(text=json.dumps({"ok": True}), headers=headers)
+
+    # ── رفع حظر ──
+    if action == "unban" and uid in ADMIN_IDS:
+        target = int(body.get("target_uid", 0))
+        if target:
+            await db_run("UPDATE users SET banned=0 WHERE user_id=?", (target,))
+        return aiohttp.web.Response(text=json.dumps({"ok": True}), headers=headers)
+
+    # ── إذاعة ──
+    if action == "broadcast" and uid in ADMIN_IDS:
+        msg_text = body.get("message", "").strip()
+        if msg_text:
+            users = await db_all("SELECT user_id FROM users WHERE banned=0")
+            sent  = 0
+            bot   = request.app["bot"]
+            for u in users:
+                try:
+                    await bot.send_message(u["user_id"], f"📢 {msg_text}", parse_mode="Markdown")
+                    sent += 1
+                except: pass
+                await asyncio.sleep(0.05)
+        return aiohttp.web.Response(text=json.dumps({"ok": True, "sent": sent}), headers=headers)
+
+    return aiohttp.web.Response(
+        text=json.dumps({"error": "unknown action"}),
+        status=400, headers=headers
+    )
+
+
+async def start_api_server(bot_instance):
+    """يشغل الـ API server على البورت المطلوب"""
+    port = int(os.getenv("PORT", 8080))
+    web_app = aiohttp.web.Application()
+    web_app["bot"] = bot_instance
+    web_app.router.add_route("*", "/api", api_handler)
+    web_app.router.add_route("*", "/api/", api_handler)
+    # Health check لـ Railway
+    async def health(_): return aiohttp.web.Response(text="OK")
+    web_app.router.add_get("/", health)
+
+    runner = aiohttp.web.AppRunner(web_app)
+    await runner.setup()
+    site = aiohttp.web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info(f"🌐 API Server شغال على port {port}")
+    return runner
+
+
+# ══════════════════════════════════════════════════════
 #                    تشغيل البوت
 # ══════════════════════════════════════════════════════
 async def _main():
@@ -2742,6 +2900,9 @@ async def _main():
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
+    # تشغيل API server
+    api_runner = await start_api_server(app.bot)
+
     import signal
     stop_event = asyncio.Event()
 
@@ -2755,6 +2916,7 @@ async def _main():
             signal.signal(sig, _stop)
 
     await stop_event.wait()
+    await api_runner.cleanup()
     await app.updater.stop()
     await app.stop()
     await app.shutdown()
