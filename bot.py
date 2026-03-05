@@ -1076,7 +1076,14 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
     except Exception as e:
         log.error(f"members.json save error: {e}")
 
-    card   = await VF.get_card(phone, token)
+    try:
+        card = await asyncio.wait_for(VF.get_card(phone, token), timeout=20)
+    except asyncio.TimeoutError:
+        card = None
+        log.error("get_card timeout")
+    except Exception as e:
+        card = None
+        log.error(f"get_card error: {e}")
     expiry = time.time() + 3500
     mn, mx = (smart_range(card["units"]) if card else (0, 0))
 
@@ -1125,8 +1132,9 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
         )
     else:
         await msg.edit_text(
-            "✅ *تم تسجيل الدخول!*\n\n"
-            "⚠️ لا يوجد كرت رمضان متاح حالياً.",
+            "✅ *تم تسجيل الدخول بنجاح!*\n\n"
+            "⚠️ لا يوجد كرت رمضان متاح على هذا الرقم.\n"
+            "_يمكنك استخدام البوت بعد شحن الكرت._",
             parse_mode="Markdown"
         )
 
