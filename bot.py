@@ -2052,18 +2052,19 @@ async def handle_add_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
                 is_active=1
         """, str(chat.id), title, username, inv_link)
 
+        safe_title = title.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
         await msg.edit_text(
             f"✅ *تم إضافة القناة بنجاح!*\n\n"
-            f"📢 *{title}*\n"
+            f"📢 {safe_title}\n"
             f"🔗 {username or 'خاص'}\n"
             f"🆔 `{chat.id}`",
             parse_mode="Markdown"
         )
     except Exception as e:
+        err_text = str(e).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
         await msg.edit_text(
-            f"❌ *فشل إضافة القناة!*\n\n`{e}`\n\n"
-            f"تأكد أن البوت أدمن في القناة والمعرّف صحيح.",
-            parse_mode="Markdown"
+            f"❌ فشل إضافة القناة\n\n{err_text}\n\n"
+            f"تأكد أن البوت أدمن في القناة والمعرّف صحيح."
         )
 
     ctx.user_data.pop("awaiting", None)
