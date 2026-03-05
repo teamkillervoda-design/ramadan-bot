@@ -26,8 +26,7 @@ from telegram import (
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters,
-    ConversationHandler
+    CallbackQueryHandler, ContextTypes, filters
 )
 from telegram.error import TelegramError
 
@@ -859,6 +858,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ok, not_subbed = await check_subscription(ctx.bot, u.id)
     if not ok:
         await subscription_wall(update, ctx, not_subbed)
+        ctx.user_data["state"] = "phone"
         return ST_PHONE
 
     if user and user.get("token") and user.get("token_expiry", 0) > time.time():
@@ -968,6 +968,7 @@ async def handle_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         f"_ستُحذف فوراً بعد تسجيل الدخول_ 🔒",
         parse_mode="Markdown"
     )
+    ctx.user_data["state"] = "password"
     return ST_PASSWORD
 
 async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1101,6 +1102,7 @@ async def handle_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
         )
 
     await update.message.reply_text("اختر من القائمة 👇", reply_markup=await get_main_kb(u.id))
+    ctx.user_data["state"] = "main"
     return ST_MAIN
 
 # ══════════════════════════════════════════════════════
@@ -1629,6 +1631,7 @@ async def gift_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         "📱 أدخل رقم فودافون الخاص بك:",
         parse_mode="Markdown"
     )
+    ctx.user_data["state"] = "gift_phone"
     return ST_GIFT_PHONE
 
 async def gift_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1637,6 +1640,7 @@ async def gift_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text("❌ رقم غير صحيح، أعد المحاولة:")
         return ST_GIFT_PHONE
     ctx.user_data["gift_phone"] = phone
+    ctx.user_data["state"] = "gift_pass"
     await update.message.reply_text(
         "🔑 *أدخل كلمة المرور*\n\n"
         "_كلمة مرور تطبيق My Vodafone_ 🔒",
@@ -1651,6 +1655,7 @@ async def gift_pass(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     except:
         pass
     ctx.user_data["gift_pass"] = pwd
+    ctx.user_data["state"] = "gift_confirm"
     await update.message.reply_text(
         "📥 *أدخل رقم المستقبِل:*",
         parse_mode="Markdown"
@@ -1695,6 +1700,7 @@ async def gift_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             txt = f"❌ *فشل إرسال الهدية!*\n\n_{err}_"
 
         await msg.edit_text(txt, parse_mode="Markdown")
+        ctx.user_data["state"] = "main"
         await update.message.reply_text("اختر من القائمة 👇", reply_markup=await get_main_kb(uid))
         return ST_MAIN
 
@@ -1800,6 +1806,7 @@ async def logout(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         f"🌙 *إلى اللقاء، رمضان كريم!* 🌙",
         parse_mode="Markdown", reply_markup=kb
     )
+    ctx.user_data["state"] = "phone"
     return ST_PHONE
 
 # ══════════════════════════════════════════════════════
@@ -1991,6 +1998,7 @@ async def cb_channel_actions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode="Markdown"
         )
         ctx.user_data["awaiting"] = "channel_id"
+        ctx.user_data["state"] = "add_channel"
         return ST_ADD_CHANNEL
 
     if q.data == "del_channel":
@@ -2059,6 +2067,7 @@ async def handle_add_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         )
 
     ctx.user_data.pop("awaiting", None)
+    ctx.user_data["state"] = "main"
     await update.message.reply_text("اختر من القائمة 👇", reply_markup=admin_kb())
     return ST_MAIN
 
@@ -2205,6 +2214,7 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             f"{fmt_card(user['card_value'], user['card_units'])}\n\nاختر نطاق التبادل:",
             parse_mode="Markdown", reply_markup=btns
         )
+        ctx.user_data["state"] = "range"
         return ST_RANGE
 
     elif d == "menu_offers":
@@ -2248,6 +2258,7 @@ async def main_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         ctx.user_data.pop("gift_phone", None)
         ctx.user_data.pop("gift_pass",  None)
         ctx.user_data.pop("gift_to",    None)
+        ctx.user_data["state"] = "gift_phone"
         await ctx.bot.send_message(
             chat_id=chat_id,
             text=f"🎁 *إرسال هدية رمضان*\n{DIV}\n\n📱 أدخل رقم فودافون الخاص بك:",
@@ -2366,6 +2377,7 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             parse_mode="Markdown"
         )
         ctx.user_data["awaiting_broadcast"] = True
+        ctx.user_data["state"] = "broadcast"
         return ST_BROADCAST
 
     elif d == "adm_channels":
@@ -2381,6 +2393,7 @@ async def admin_menu_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(btns)
         )
+        ctx.user_data["state"] = "add_channel"
         return ST_ADD_CHANNEL
 
     elif d == "adm_trades":
@@ -2808,93 +2821,81 @@ async def start_api_server(bot_instance):
 # ══════════════════════════════════════════════════════
 #                    تشغيل البوت
 # ══════════════════════════════════════════════════════
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
+    await update.message.reply_text(
+        "✅ تم الإلغاء.",
+        reply_markup=await get_main_kb(update.effective_user.id)
+    )
+
+
+async def smart_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Router مركزي — يوجّه الرسائل النصية حسب الـ state الحالي"""
+    uid   = update.effective_user.id
+    state = ctx.user_data.get("state", "main")
+    t     = update.message.text.strip() if update.message and update.message.text else ""
+
+    # حالات الإدخال
+    if state == "phone":       return await handle_phone(update, ctx)
+    if state == "password":    return await handle_password(update, ctx)
+    if state == "range":       return await handle_range(update, ctx)
+    if state == "gift_phone":  return await gift_phone(update, ctx)
+    if state == "gift_pass":   return await gift_pass(update, ctx)
+    if state == "gift_confirm":return await gift_confirm(update, ctx)
+    if state == "broadcast" and is_admin(uid):
+        ctx.user_data["state"] = "main"
+        return await admin_broadcast_send(update, ctx)
+    if state == "add_channel" and is_admin(uid):
+        return await handle_add_channel(update, ctx)
+
+    # أزرار الأدمن
+    if is_admin(uid):
+        if t == "📊 إحصائيات":       return await admin_stats(update, ctx)
+        if t == "👥 المستخدمون":      return await admin_users(update, ctx)
+        if t == "📢 إرسال إعلان":     return await admin_broadcast_start(update, ctx)
+        if t == "📋 قنوات الاشتراك":  return await admin_channels(update, ctx)
+        if t == "📝 سجل التبادلات":   return await admin_trades(update, ctx)
+        if t == "🔙 القائمة الرئيسية":
+            await update.message.reply_text("👇", reply_markup=await get_main_kb(uid))
+            return
+
+    # أزرار عادية
+    if t == "🔄 سوق التبادل":       return await market(update, ctx)
+    if t == "📋 عرض كارتي":         return await post_offer(update, ctx)
+    if t == "📊 عروضي":             return await my_offers(update, ctx)
+    if t == "📖 سجل عملياتي":       return await trade_log(update, ctx)
+    if t == "🎁 إرسال هدية":         return await gift_start(update, ctx)
+    if t == "🔔 إشعاراتي":          return await notifications(update, ctx)
+    if t == "🔃 تحديث الكرت":        return await cmd_refresh(update, ctx)
+    if t == "❓ المساعدة":           return await help_cmd(update, ctx)
+    if t == "🚪 خروج":              return await logout(update, ctx)
+
+
 async def _main():
     await init_db()
 
     app = (Application.builder()
            .token(BOT_TOKEN)
-           .concurrent_updates(False)   # ← مهم: False عشان ConversationHandler يشتغل صح
+           .concurrent_updates(True)
            .build())
 
-    # ── ConversationHandler الرئيسي ──────────────────
-    conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", cmd_start),
-        ],
-        states={
-            # ── انتظار رقم الهاتف ──
-            ST_PHONE: [
-                CallbackQueryHandler(cb_login,    pattern="^(do_login|about|check_sub)$"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone),
-            ],
-            # ── انتظار كلمة المرور ──
-            ST_PASSWORD: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password),
-            ],
-            # ── القائمة الرئيسية ──
-            ST_MAIN: [
-                CallbackQueryHandler(main_menu_cb,       pattern="^menu_"),
-                CallbackQueryHandler(admin_menu_cb,      pattern="^adm_"),
-                CallbackQueryHandler(handle_range,       pattern="^range_"),
-                CallbackQueryHandler(cb_market,          pattern="^(pick_|exec_|offer_next|offer_prev|noop|main_menu|trade_|confirm_trade)"),
-                CallbackQueryHandler(cb_cancel_offers,   pattern="^cancel_my_offers$"),
-                CallbackQueryHandler(cb_channel_actions, pattern="^(add_channel|del_channel|rmch_|admin_refresh_stats|back_admin)"),
-                CallbackQueryHandler(cb_login,           pattern="^(do_login|about|check_sub)$"),
-                MessageHandler(filters.ALL & ~filters.COMMAND, text_router),
-            ],
-            # ── اختيار نطاق العرض ──
-            ST_RANGE: [
-                CallbackQueryHandler(handle_range,  pattern="^range_"),
-                CallbackQueryHandler(main_menu_cb,  pattern="^menu_"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_range),
-            ],
-            # ── تأكيد التبادل ──
-            ST_CONFIRM_TRADE: [
-                CallbackQueryHandler(cb_market,    pattern="^(pick_|exec_|offer_next|offer_prev|noop|main_menu|trade_|confirm_trade)"),
-                CallbackQueryHandler(main_menu_cb, pattern="^menu_"),
-            ],
-            # ── تدفق الهدية ──
-            ST_GIFT_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, gift_phone),
-            ],
-            ST_GIFT_PASS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, gift_pass),
-            ],
-            ST_GIFT_CONFIRM: [
-                CallbackQueryHandler(gift_confirm, pattern="^gift_confirm$"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, gift_confirm),
-            ],
-            # ── إرسال إعلان ──
-            ST_BROADCAST: [
-                MessageHandler(filters.ALL & ~filters.COMMAND, admin_broadcast_send),
-            ],
-            # ── إضافة قناة ──
-            ST_ADD_CHANNEL: [
-                CallbackQueryHandler(cb_channel_actions, pattern="^(add_channel|del_channel|rmch_|admin_refresh_stats|back_admin)"),
-                CallbackQueryHandler(admin_menu_cb,      pattern="^adm_"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_channel),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("start",  cmd_start),
-            CommandHandler("cancel", lambda u, c: (
-                u.message.reply_text("✅ تم الإلغاء.") or ST_MAIN
-            ) if u.message else ST_MAIN),
-        ],
-        allow_reentry=True,
-        conversation_timeout=3600,  # ساعة كاملة
-        per_message=False,
-    )
+    # Callbacks — بيشتغلوا دايماً
+    app.add_handler(CallbackQueryHandler(cb_login,          pattern="^(do_login|about|check_sub)$"))
+    app.add_handler(CallbackQueryHandler(main_menu_cb,      pattern="^menu_"))
+    app.add_handler(CallbackQueryHandler(admin_menu_cb,     pattern="^adm_"))
+    app.add_handler(CallbackQueryHandler(handle_range,      pattern="^range_"))
+    app.add_handler(CallbackQueryHandler(cb_market,         pattern="^(pick_|exec_|offer_next|offer_prev|noop|main_menu|trade_|confirm_trade)"))
+    app.add_handler(CallbackQueryHandler(cb_cancel_offers,  pattern="^cancel_my_offers$"))
+    app.add_handler(CallbackQueryHandler(cb_channel_actions,pattern="^(add_channel|del_channel|rmch_|admin_refresh_stats|back_admin)"))
+    app.add_handler(CallbackQueryHandler(gift_confirm,      pattern="^gift_confirm$"))
 
-    app.add_handler(conv, group=0)
+    # Messages
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, smart_text_router))
 
-    # WebApp data handler
-    app.add_handler(
-        MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data),
-        group=1
-    )
-
-    # أوامر الأدمن - تشتغل في أي وقت
+    # Commands
+    app.add_handler(CommandHandler("start",        cmd_start))
+    app.add_handler(CommandHandler("cancel",       cmd_cancel))
     app.add_handler(CommandHandler("admin",        cmd_admin))
     app.add_handler(CommandHandler("stats",        admin_stats))
     app.add_handler(CommandHandler("ban",          admin_ban_cmd))
@@ -2907,7 +2908,7 @@ async def _main():
     app.add_handler(CommandHandler("setdashboard", cmd_setdashboard))
     app.add_handler(CommandHandler("dashboard",    cmd_dashboard))
 
-    log.info("💎 البوت يعمل — PostgreSQL Edition v4.2")
+    log.info("💎 البوت يعمل — PostgreSQL Edition v4.3")
 
     await app.initialize()
     await app.start()
@@ -2917,22 +2918,16 @@ async def _main():
 
     import signal
     stop_event = asyncio.Event()
-
-    def _stop(*_):
-        stop_event.set()
-
+    def _stop(*_): stop_event.set()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            asyncio.get_event_loop().add_signal_handler(sig, _stop)
-        except Exception:
-            signal.signal(sig, _stop)
+        try:    asyncio.get_event_loop().add_signal_handler(sig, _stop)
+        except: signal.signal(sig, _stop)
 
     await stop_event.wait()
     await api_runner.cleanup()
     await app.updater.stop()
     await app.stop()
     await app.shutdown()
-
 
 def main():
     asyncio.run(_main())
