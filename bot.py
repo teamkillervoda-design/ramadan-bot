@@ -2808,10 +2808,20 @@ async def _main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password),
             ],
             ST_MAIN: [
+                # range callbacks من القائمة الرئيسية
+                CallbackQueryHandler(handle_range, pattern="^range_"),
+                # market callbacks
+                CallbackQueryHandler(cb_market, pattern="^(pick_|exec_|offer_next|offer_prev|noop|main_menu|trade_|confirm_trade)"),
                 MessageHandler(filters.ALL & ~filters.COMMAND, text_router),
             ],
             ST_RANGE: [
+                # callback buttons في شاشة النطاق
+                CallbackQueryHandler(handle_range, pattern="^range_"),
+                # النص اللي بيكتبه المستخدم
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_range),
+            ],
+            ST_CONFIRM_TRADE: [
+                CallbackQueryHandler(cb_market, pattern="^(pick_|exec_|offer_next|offer_prev|noop|main_menu|trade_|confirm_trade)"),
             ],
             ST_GIFT_PHONE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, gift_phone),
@@ -2827,6 +2837,7 @@ async def _main():
             ],
             ST_ADD_CHANNEL: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_channel),
+                CallbackQueryHandler(cb_channel_actions, pattern="^(add_channel|del_channel|rmch_|admin_refresh_stats|back_admin)"),
             ],
         },
         fallbacks=[CommandHandler("start", cmd_start)],
@@ -2842,8 +2853,6 @@ async def _main():
     app.add_handler(CallbackQueryHandler(main_menu_cb,      pattern="^menu_"),                      group=1)
     app.add_handler(CallbackQueryHandler(admin_menu_cb,     pattern="^adm_"),                       group=1)
     app.add_handler(CallbackQueryHandler(cb_cancel_offers,  pattern="^cancel_my_offers$"),          group=1)
-    app.add_handler(CallbackQueryHandler(handle_range,      pattern="^range_"),                     group=1)
-    app.add_handler(CallbackQueryHandler(cb_market,         pattern="^(pick_|exec_|offer_next|offer_prev|noop|main_menu|trade_|confirm_trade)"), group=1)
     app.add_handler(CallbackQueryHandler(cb_channel_actions,pattern="^(add_channel|del_channel|rmch_|admin_refresh_stats|back_admin)"), group=1)
     app.add_handler(CallbackQueryHandler(gift_confirm,      pattern="^gift_confirm$"),              group=1)
 
