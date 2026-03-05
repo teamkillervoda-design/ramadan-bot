@@ -255,7 +255,7 @@ async def db_val(query: str, *params):
 
 async def get_user(user_id: int) -> Optional[dict]:
     return await db_get(
-        "SELECT * FROM users WHERE user_id=$1 AND banned=0", user_id
+        "SELECT * FROM users WHERE user_id=$1 AND banned=0 AND logged_out=0", user_id
     )
 
 async def get_active_channels() -> list:
